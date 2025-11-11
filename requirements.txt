@@ -1,0 +1,4 @@
+streamlit>=1.24.0,<2.0
+pandas>=1.5.0,<3.0
+
+# Optional: pin a specific Python version when building the image (Dockerfile uses python:3.10-slim)
