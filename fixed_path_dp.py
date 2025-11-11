@@ -422,31 +422,34 @@ class FixedPathOptimizer:
 
         # OPTION 2: Full/Partial Swap Only
         if station.allow_swap:
-            if station.available_batteries is not None and station.available_batteries < 1:
+            # Calculate swap cost based on full vs partial swap mode
+            total_num_containers = int(capacity_kwh / self.inputs.battery_container_capacity_kwh)
+            if total_num_containers < 1:
+                total_num_containers = 1
+            
+            # Determine how many containers need swapping
+            if station.partial_swap_allowed:
+                # PARTIAL SWAP: Only swap depleted containers
+                containers_to_swap = total_num_containers - int(current_soc_kwh / self.inputs.battery_container_capacity_kwh)
+                if containers_to_swap < 0:
+                    containers_to_swap = 0
+                if current_soc_kwh < capacity_kwh and containers_to_swap == 0:
+                    containers_to_swap = 1
+            else:
+                # FULL SWAP: Always swap entire battery set
+                containers_to_swap = total_num_containers
+            
+            # Check if enough batteries are available for the swap
+            if station.available_batteries is not None and station.available_batteries < containers_to_swap:
                 if station.force_swap:
                     raise ValueError(
-                        f"Station {station.name} requires swap but no batteries available"
+                        f"Station {station.name} requires swap of {containers_to_swap} containers "
+                        f"but only {station.available_batteries} batteries available"
                     )
+                # Not enough batteries - skip this swap option
             else:
                 capacity_level = self._capacity_steps
                 swap_time = station.min_docking_time_hr  # Use minimum docking time for swap
-                
-                # Calculate swap cost based on full vs partial swap mode
-                total_num_containers = int(capacity_kwh / self.inputs.battery_container_capacity_kwh)
-                if total_num_containers < 1:
-                    total_num_containers = 1
-                
-                # Determine how many containers need swapping
-                if station.partial_swap_allowed:
-                    # PARTIAL SWAP: Only swap depleted containers
-                    containers_to_swap = total_num_containers - int(current_soc_kwh / self.inputs.battery_container_capacity_kwh)
-                    if containers_to_swap < 0:
-                        containers_to_swap = 0
-                    if current_soc_kwh < capacity_kwh and containers_to_swap == 0:
-                        containers_to_swap = 1
-                else:
-                    # FULL SWAP: Always swap entire battery set
-                    containers_to_swap = total_num_containers
                 
                 # Simplified swap cost calculation
                 # Service fee scales with number of containers (includes handling + operations)
@@ -525,78 +528,79 @@ class FixedPathOptimizer:
 
         # OPTION 4: Hybrid (Swap + Charge)
         if station.allow_swap and station.charging_allowed and station.charging_power_kw > 0:
-            if station.available_batteries is not None and station.available_batteries < 1:
-                pass  # Skip hybrid if no batteries available
-            else:
-                max_dwell = station.max_docking_time_hr if station.max_docking_time_hr is not None else 24.0
+            max_dwell = station.max_docking_time_hr if station.max_docking_time_hr is not None else 24.0
+            
+            # Hybrid time options: short charge after swap
+            hybrid_charge_times = [0.5, 1.0, 2.0, 3.0, 4.0]
+            
+            for charge_time in hybrid_charge_times:
+                total_time = station.min_docking_time_hr + charge_time
+                if total_time > max_dwell:
+                    continue
                 
-                # Hybrid time options: short charge after swap
-                hybrid_charge_times = [0.5, 1.0, 2.0, 3.0, 4.0]
+                # Calculate swap portion (same as full swap)
+                total_num_containers = int(capacity_kwh / self.inputs.battery_container_capacity_kwh)
+                if total_num_containers < 1:
+                    total_num_containers = 1
                 
-                for charge_time in hybrid_charge_times:
-                    total_time = station.min_docking_time_hr + charge_time
-                    if total_time > max_dwell:
-                        continue
-                    
-                    # Calculate swap portion (same as full swap)
-                    total_num_containers = int(capacity_kwh / self.inputs.battery_container_capacity_kwh)
-                    if total_num_containers < 1:
-                        total_num_containers = 1
-                    
-                    if station.partial_swap_allowed:
-                        containers_to_swap = total_num_containers - int(current_soc_kwh / self.inputs.battery_container_capacity_kwh)
-                        if containers_to_swap < 0:
-                            containers_to_swap = 0
-                        if current_soc_kwh < capacity_kwh and containers_to_swap == 0:
-                            containers_to_swap = 1
-                    else:
-                        containers_to_swap = total_num_containers
-                    
-                    # After swap, SoC is at capacity
-                    soc_after_swap = capacity_kwh
-                    
-                    # Then charge (which doesn't add much since already at capacity)
-                    # But in partial swap case, there may be room for charging
-                    energy_charged_kwh = min(
-                        charge_time * station.charging_power_kw * station.charging_efficiency,
-                        capacity_kwh - soc_after_swap
-                    )
-                    
-                    # Skip if no meaningful charging happens
-                    if energy_charged_kwh < 0.1 and containers_to_swap == 0:
-                        continue
-                    
-                    final_soc_kwh = soc_after_swap + energy_charged_kwh
-                    final_level = self._to_step(final_soc_kwh)
-                    
-                    # Calculate hybrid cost (swap + charge) - simplified
-                    service_fee_per_container = station.base_service_fee + station.swap_cost
-                    service_fee = service_fee_per_container * containers_to_swap
-                    
-                    swap_energy_kwh = capacity_kwh - current_soc_kwh
-                    swap_energy_cost = swap_energy_kwh * station.energy_cost_per_kwh
-                    degradation_cost = swap_energy_kwh * station.degradation_fee_per_kwh
-                    
-                    swap_cost = service_fee + swap_energy_cost + degradation_cost
-                    charge_cost = energy_charged_kwh * station.energy_cost_per_kwh + station.base_charging_fee
-                    
-                    # Hotelling for total hybrid time
-                    hotelling_energy_hybrid = hotelling_power_kw * total_time
-                    hotelling_cost = hotelling_energy_hybrid * station.energy_cost_per_kwh
-                    
-                    total_hybrid_cost = swap_cost + charge_cost + hotelling_cost
-                    
-                    options.append((
-                        final_level,
-                        total_hybrid_cost,
-                        total_time,
-                        True,  # swapped
-                        True,  # charged
-                        "hybrid",
-                        containers_to_swap,
-                        energy_charged_kwh,
-                        hotelling_energy_hybrid
-                    ))
+                if station.partial_swap_allowed:
+                    containers_to_swap = total_num_containers - int(current_soc_kwh / self.inputs.battery_container_capacity_kwh)
+                    if containers_to_swap < 0:
+                        containers_to_swap = 0
+                    if current_soc_kwh < capacity_kwh and containers_to_swap == 0:
+                        containers_to_swap = 1
+                else:
+                    containers_to_swap = total_num_containers
+                
+                # Check if enough batteries are available for hybrid swap
+                if station.available_batteries is not None and station.available_batteries < containers_to_swap:
+                    continue  # Skip this hybrid option if not enough batteries
+                
+                # After swap, SoC is at capacity
+                soc_after_swap = capacity_kwh
+                
+                # Then charge (which doesn't add much since already at capacity)
+                # But in partial swap case, there may be room for charging
+                energy_charged_kwh = min(
+                    charge_time * station.charging_power_kw * station.charging_efficiency,
+                    capacity_kwh - soc_after_swap
+                )
+                
+                # Skip if no meaningful charging happens
+                if energy_charged_kwh < 0.1 and containers_to_swap == 0:
+                    continue
+                
+                final_soc_kwh = soc_after_swap + energy_charged_kwh
+                final_level = self._to_step(final_soc_kwh)
+                
+                # Calculate hybrid cost (swap + charge) - simplified
+                service_fee_per_container = station.base_service_fee + station.swap_cost
+                service_fee = service_fee_per_container * containers_to_swap
+                
+                swap_energy_kwh = capacity_kwh - current_soc_kwh
+                swap_energy_cost = swap_energy_kwh * station.energy_cost_per_kwh
+                degradation_cost = swap_energy_kwh * station.degradation_fee_per_kwh
+                
+                swap_cost = service_fee + swap_energy_cost + degradation_cost
+                charge_cost = energy_charged_kwh * station.energy_cost_per_kwh + station.base_charging_fee
+                
+                # Hotelling for total hybrid time
+                hotelling_energy_hybrid = hotelling_power_kw * total_time
+                hotelling_cost = hotelling_energy_hybrid * station.energy_cost_per_kwh
+                
+                total_hybrid_cost = swap_cost + charge_cost + hotelling_cost
+                
+                options.append((
+                    final_level,
+                    total_hybrid_cost,
+                    total_time,
+                    True,  # swapped
+                    True,  # charged
+                    "hybrid",
+                    containers_to_swap,
+                    energy_charged_kwh,
+                    hotelling_energy_hybrid
+                ))
 
         return options
 
@@ -787,9 +791,13 @@ class FixedPathOptimizer:
                 if not station.allow_swap and not station.charging_allowed:
                     diagnostics.append(f"       ❌ No charging or swapping at {station.name}")
                     diagnostics.append(f"          SOLUTION: Enable swap or charging at this station")
-                elif station.allow_swap and station.available_batteries is not None and station.available_batteries < 1:
-                    diagnostics.append(f"       ❌ Swap allowed but no batteries available at {station.name}")
-                    diagnostics.append(f"          SOLUTION: Increase available_batteries")
+                elif station.allow_swap and station.available_batteries is not None:
+                    # Calculate how many containers might be needed
+                    total_containers = int(inputs.battery_capacity_kwh / inputs.battery_container_capacity_kwh)
+                    if station.available_batteries < total_containers:
+                        diagnostics.append(f"       ⚠️  Swap allowed but only {station.available_batteries} batteries available at {station.name}")
+                        diagnostics.append(f"          May need up to {total_containers} containers for full swap")
+                        diagnostics.append(f"          SOLUTION: Increase available_batteries to {total_containers} or enable partial_swap_allowed")
                 elif station.charging_allowed and station.charging_power_kw <= 0:
                     diagnostics.append(f"       ⚠️  Charging enabled but no charging power at {station.name}")
                     diagnostics.append(f"          SOLUTION: Set charging_power_kw > 0")
