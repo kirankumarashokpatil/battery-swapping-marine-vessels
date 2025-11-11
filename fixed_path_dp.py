@@ -169,10 +169,9 @@ class Station:
     charging_allowed: bool = False  # Whether charging infrastructure is available
     
     # Hybrid/Custom Pricing Components (Current Direct-style model)
-    base_service_fee: float = 0.0  # Fixed base fee per swap transaction (independent of container count)
-    location_premium: float = 0.0  # Location-based markup ($ or % of base cost) for high-demand/strategic ports
+    swap_cost: float = 0.0  # Per-container swap handling fee (scales with number of containers)
+    base_service_fee: float = 8.0  # Base service fee per container (default: £8/container)
     degradation_fee_per_kwh: float = 0.0  # Charge based on battery wear/degradation
-    subscription_discount: float = 0.0  # Percentage discount for subscription customers (0.0-1.0)
     base_charging_fee: float = 0.0  # Fixed fee for using charging infrastructure
 
 
@@ -414,11 +413,12 @@ class FixedPathOptimizer:
         if self.inputs.vessel_specs is not None:
             hotelling_power_kw = self.inputs.vessel_specs.get_hotelling_power_kw()
 
-        # OPTION 1: No operation - just minimum docking time for port operations
+        # OPTION 1: No operation - pass through without stopping
         if not station.force_swap:
-            min_dwell = station.min_docking_time_hr
-            hotelling_energy_no_op = hotelling_power_kw * min_dwell
-            options.append((level, 0.0, min_dwell, False, False, "none", 0, 0.0, hotelling_energy_no_op))
+            # No docking time when just passing through
+            dwell_time_no_op = 0.0
+            hotelling_energy_no_op = 0.0  # No hotelling if not docked
+            options.append((level, 0.0, dwell_time_no_op, False, False, "none", 0, 0.0, hotelling_energy_no_op))
 
         # OPTION 2: Full/Partial Swap Only
         if station.allow_swap:
@@ -448,15 +448,16 @@ class FixedPathOptimizer:
                     # FULL SWAP: Always swap entire battery set
                     containers_to_swap = total_num_containers
                 
-                # Calculate swap cost
-                base_fee = station.base_service_fee
-                location_cost = station.location_premium * containers_to_swap
+                # Simplified swap cost calculation
+                # Service fee scales with number of containers (includes handling + operations)
+                service_fee_per_container = station.base_service_fee + station.swap_cost
+                service_fee = service_fee_per_container * containers_to_swap
+                
                 energy_kwh_needed = capacity_kwh - current_soc_kwh
                 energy_cost = energy_kwh_needed * station.energy_cost_per_kwh
                 degradation_cost = energy_kwh_needed * station.degradation_fee_per_kwh
                 
-                subtotal = base_fee + location_cost + energy_cost + degradation_cost
-                total_swap_cost = subtotal * (1.0 - station.subscription_discount)
+                total_swap_cost = service_fee + energy_cost + degradation_cost
                 
                 # Add hotelling cost
                 hotelling_energy_swap = hotelling_power_kw * swap_time
@@ -568,16 +569,15 @@ class FixedPathOptimizer:
                     final_soc_kwh = soc_after_swap + energy_charged_kwh
                     final_level = self._to_step(final_soc_kwh)
                     
-                    # Calculate hybrid cost (swap + charge)
-                    base_fee = station.base_service_fee
-                    location_cost = station.location_premium * containers_to_swap
+                    # Calculate hybrid cost (swap + charge) - simplified
+                    service_fee_per_container = station.base_service_fee + station.swap_cost
+                    service_fee = service_fee_per_container * containers_to_swap
+                    
                     swap_energy_kwh = capacity_kwh - current_soc_kwh
                     swap_energy_cost = swap_energy_kwh * station.energy_cost_per_kwh
                     degradation_cost = swap_energy_kwh * station.degradation_fee_per_kwh
                     
-                    swap_subtotal = base_fee + location_cost + swap_energy_cost + degradation_cost
-                    swap_cost = swap_subtotal * (1.0 - station.subscription_discount)
-                    
+                    swap_cost = service_fee + swap_energy_cost + degradation_cost
                     charge_cost = energy_charged_kwh * station.energy_cost_per_kwh + station.base_charging_fee
                     
                     # Hotelling for total hybrid time

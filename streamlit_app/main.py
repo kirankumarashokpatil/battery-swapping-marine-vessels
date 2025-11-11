@@ -323,11 +323,10 @@ def build_inputs(config: Dict) -> FixedPathInputs:
                 charging_power_kw=float(station_cfg.get("charging_power_kw", 0.0)),
                 charging_efficiency=float(station_cfg.get("charging_efficiency", 0.95)),
                 charging_allowed=_safe_bool(station_cfg.get("charging_allowed", False), default=False),
-                # Hybrid pricing components
-                base_service_fee=float(station_cfg.get("base_service_fee", 0.0)),
-                location_premium=float(station_cfg.get("location_premium", 0.0)),
+                # Simplified pricing components
+                swap_cost=float(station_cfg.get("swap_cost", 0.0)),
+                base_service_fee=float(station_cfg.get("base_service_fee", 8.0)),
                 degradation_fee_per_kwh=float(station_cfg.get("degradation_fee_per_kwh", 0.0)),
-                subscription_discount=float(station_cfg.get("subscription_discount", 0.0)),
                 base_charging_fee=float(station_cfg.get("base_charging_fee", 0.0)),
             )
         )
@@ -558,7 +557,7 @@ def run_optimizer(config: Dict) -> Tuple[pd.DataFrame, Dict[str, object]]:
                 "Energy Charged (kWh)": step.energy_charged_kwh,
                 "Arrival (hr)": step.arrival_time_hr,
                 "Departure (hr)": step.departure_time_hr,
-                "Docking (hr)": step.station_docking_time_hr,
+                "Dwell (hr)": step.station_docking_time_hr,  # Time spent at port
                 "Travel (hr)": step.travel_time_hr,
                 "SoC Before (kWh)": step.soc_before_kwh,
                 "SoC After Operation (kWh)": step.soc_after_operation_kwh,
@@ -594,10 +593,7 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
     # This matches the optimizer's actual hybrid pricing model
     total_swap_service_cost = 0.0
     total_energy_charging_cost = 0.0
-    total_base_fees = 0.0
-    total_location_premium = 0.0
     total_degradation = 0.0
-    total_discount = 0.0
     total_hotelling_cost = 0.0
     battery_cap = config.get('battery_capacity_kwh', 1960.0)
     
@@ -615,34 +611,26 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                 # Calculate ACTUAL energy charged (SoC-based billing)
                 energy_needed = battery_cap - soc_before_swap
                 
-                # Get all hybrid pricing components
-                swap_service = station_config.get('swap_cost', 0) * num_containers
+                # Simplified hybrid pricing components
+                # Service fee = per-container handling + fixed operations fee (scales with containers)
+                base_service_fee = station_config.get('base_service_fee', 80.0)
+                per_container_fee = station_config.get('swap_cost', 0)
+                service_fee = (base_service_fee + per_container_fee) * num_containers
+                
                 energy_charging = energy_needed * station_config.get('energy_cost_per_kwh', 0.09)
-                base_fee = station_config.get('base_service_fee', 0.0)
-                location_premium = station_config.get('location_premium', 0.0) * num_containers
                 degradation_fee = station_config.get('degradation_fee_per_kwh', 0.0) * energy_needed
                 
                 # Hotelling energy cost
                 hotelling_energy = row.get('Hotelling Energy (kWh)', 0.0)
                 hotelling_cost = hotelling_energy * station_config.get('energy_cost_per_kwh', 0.09)
                 
-                # Subscription discount
-                subscription_discount = station_config.get('subscription_discount', 0.0)
-                
-                # Calculate subtotal before discount (including hotelling)
-                subtotal_before_adjustments = swap_service + energy_charging + base_fee + location_premium + degradation_fee + hotelling_cost
-                
-                # Apply subscription discount
-                discount_amount = subtotal_before_adjustments * subscription_discount
-                total_cost_this_swap = subtotal_before_adjustments - discount_amount
+                # Calculate total cost
+                total_cost_this_swap = service_fee + energy_charging + degradation_fee + hotelling_cost
                 
                 # Accumulate totals
-                total_swap_service_cost += swap_service
+                total_swap_service_cost += service_fee
                 total_energy_charging_cost += energy_charging
-                total_base_fees += base_fee
-                total_location_premium += location_premium
                 total_degradation += degradation_fee
-                total_discount += discount_amount
                 total_hotelling_cost += hotelling_cost
                 
                 # Store details for table
@@ -651,12 +639,9 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                     'num_containers': num_containers,
                     'soc_before': soc_before_swap,
                     'energy_needed': energy_needed,
-                    'swap_service': swap_service,
+                    'service_fee': service_fee,
                     'energy_charging': energy_charging,
-                    'base_fee': base_fee,
-                    'location_premium': location_premium,
                     'degradation_fee': degradation_fee,
-                    'discount_amount': discount_amount,
                     'hotelling_energy': hotelling_energy,
                     'hotelling_cost': hotelling_cost,
                     'total_cost': total_cost_this_swap,
@@ -670,11 +655,8 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
     total_all_swap_costs = (
         total_swap_service_cost + 
         total_energy_charging_cost + 
-        total_base_fees + 
-        total_location_premium + 
         total_degradation +
-        total_hotelling_cost -
-        total_discount
+        total_hotelling_cost
     )
     
     # Time cost and other non-swap costs
@@ -715,9 +697,9 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
 
     if not steps_df.empty:
         # Enhanced summary with swap breakdown
-        st.markdown("### � Battery Swap Summary")
+        st.markdown("### 🔋 Battery Swap Summary")
         if swap_cost_details:
-            swap_col1, swap_col2, swap_col3, swap_col4 = st.columns(4)
+            swap_col1, swap_col2, swap_col3 = st.columns(3)
             
             with swap_col1:
                 st.metric(
@@ -730,17 +712,10 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                 st.metric(
                     "💵 Swap Costs",
                     f"£{total_all_swap_costs:.2f}",
-                    help="Total of all swap-related costs (service + energy + fees + surcharges - discounts)"
+                    help="Total of all swap-related costs (service + energy + degradation + hotelling)"
                 )
             
             with swap_col3:
-                st.metric(
-                    "⏱️ Time Cost",
-                    f"£{total_time_and_other_costs:.2f}",
-                    help="Cost of journey time (from time_cost_per_hr)"
-                )
-            
-            with swap_col4:
                 avg_swap_cost = total_all_swap_costs / len(swap_cost_details) if swap_cost_details else 0
                 st.metric(
                     "📊 Avg Swap Cost",
@@ -770,14 +745,11 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                     'Returned SoC': f"{detail['soc_before']:.0f} kWh ({soc_before_pct:.0f}%)",
                     'Energy Charged': f"{detail['energy_needed']:.0f} kWh",
                     'Hotelling': f"{detail['hotelling_energy']:.0f} kWh" if detail['hotelling_energy'] > 0 else "—",
-                    'Service Fee': f"£{detail['swap_service']:.2f}",
+                    'Service Fee': f"£{detail['service_fee']:.2f}",
                     'Energy Cost': f"£{detail['energy_charging']:.2f}",
                     'Hotelling Cost': f"£{detail['hotelling_cost']:.2f}" if detail['hotelling_cost'] > 0 else "—",
-                    'Base Fee': f"£{detail['base_fee']:.2f}",
-                    'Location': f"£{detail['location_premium']:.2f}",
-                    'Degradation': f"£{detail['degradation_fee']:.2f}",
-                    'Discount': f"-£{detail['discount_amount']:.2f}" if detail['discount_amount'] > 0 else "—",
-                    'Total Cost': f"£{detail['total_cost']:.2f}",
+                    'Battery Wear': f"£{detail['degradation_fee']:.2f}",
+                    'Total': f"£{detail['total_cost']:.2f}",
                 })
             
             if swap_table_data:
@@ -801,7 +773,11 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                 st.info(f"""
                 📦 **Total Battery Containers Swapped**: {total_containers_swapped} BC across {len(swap_cost_details)} station(s)
                 
-                💡 **Hybrid Pricing Model**: Costs include service fees (per container swapped), energy (SoC-based billing), hotelling energy, base fees, location premiums, degradation fees, and subscription discounts.{hotelling_info}{swap_mode_info}
+                💡 **Cost Breakdown**:
+                • **Service Fee**: £{total_swap_service_cost:.2f} - Swap operations (scales with # containers)
+                • **Energy Cost**: £{total_energy_charging_cost:.2f} - Electricity for charging (SoC-based billing)
+                • **Battery Wear**: £{total_degradation:.2f} - Battery degradation/cycling cost
+                • **Hotelling**: £{total_hotelling_cost:.2f} - Onboard services energy (HVAC, lights, pumps, etc.){hotelling_info}{swap_mode_info}
                 """)
                 
                 st.dataframe(
@@ -848,15 +824,62 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
         
         with col_right:
             st.markdown("### 📈 State of Charge Profile")
-            soc_df = pd.DataFrame(totals["soc_profile"], columns=["Stop", "SoC (kWh)"])
-            st.line_chart(soc_df.set_index("Stop"), height=400)
+            
+            # Build timeline-based SoC profile
+            soc_timeline_data = []
+            for idx, row in steps_df.iterrows():
+                arrival_time = row['Arrival (hr)']
+                departure_time = row['Departure (hr)']
+                soc_before = row['SoC Before (kWh)']
+                soc_after_op = row['SoC After Operation (kWh)']
+                station = row['Station']
+                
+                # Add arrival point
+                soc_timeline_data.append({
+                    'Time (hr)': arrival_time,
+                    'SoC (kWh)': soc_before,
+                    'Station': station,
+                    'Event': 'Arrival'
+                })
+                
+                # Add departure point (after swap/charge operations)
+                soc_timeline_data.append({
+                    'Time (hr)': departure_time,
+                    'SoC (kWh)': soc_after_op,
+                    'Station': station,
+                    'Event': 'Departure'
+                })
+            
+            # Add final arrival at destination
+            if len(steps_df) > 0:
+                last_row = steps_df.iloc[-1]
+                final_soc = last_row['SoC After Segment (kWh)']
+                final_time = last_row['Departure (hr)'] + last_row['Travel (hr)']
+                final_station = last_row['Segment'].split('->')[-1].strip()
+                
+                soc_timeline_data.append({
+                    'Time (hr)': final_time,
+                    'SoC (kWh)': final_soc,
+                    'Station': final_station,
+                    'Event': 'Final Arrival'
+                })
+            
+            soc_timeline_df = pd.DataFrame(soc_timeline_data)
+            
+            # Create line chart with time axis
+            st.line_chart(
+                soc_timeline_df.set_index('Time (hr)')[['SoC (kWh)']], 
+                height=400
+            )
             
             st.markdown("### 💡 Quick Insights")
-            avg_soc = soc_df["SoC (kWh)"].mean()
-            min_soc = soc_df["SoC (kWh)"].min()
-            max_soc = soc_df["SoC (kWh)"].max()
+            avg_soc = soc_timeline_df["SoC (kWh)"].mean()
+            min_soc = soc_timeline_df["SoC (kWh)"].min()
+            max_soc = soc_timeline_df["SoC (kWh)"].max()
+            total_journey_time = soc_timeline_df["Time (hr)"].max() - soc_timeline_df["Time (hr)"].min()
             
             st.info(f"""
+            - **Journey Time**: {total_journey_time:.2f} hours
             - **Average SoC**: {avg_soc:.1f} kWh
             - **Minimum SoC**: {min_soc:.1f} kWh
             - **Maximum SoC**: {max_soc:.1f} kWh
@@ -946,8 +969,6 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
             cost_breakdown = []
             total_swap_service_cost = 0
             total_energy_charging_cost = 0
-            total_base_fees = 0
-            total_location_premium = 0
             total_degradation = 0
             
             for idx, row in steps_df.iterrows():
@@ -962,40 +983,30 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                     # Get number of containers swapped
                     num_containers = row.get('Containers', 10)
                     
-                    # Calculate cost components
-                    swap_service = station_config.get('swap_cost', 0) * num_containers
+                    # Simplified service fee = scales with containers
+                    base_service_fee = station_config.get('base_service_fee', 80.0)
+                    per_container_fee = station_config.get('swap_cost', 0)
+                    service_fee = (base_service_fee + per_container_fee) * num_containers
+                    
                     energy_cost_per_kwh = station_config.get('energy_cost_per_kwh', 0.09)
                     energy_charging = energy_needed * energy_cost_per_kwh
-                    
-                    # Hybrid pricing components
-                    base_fee = station_config.get('base_service_fee', 0.0)
-                    location_premium = station_config.get('location_premium', 0.0) * num_containers
                     degradation_fee = station_config.get('degradation_fee_per_kwh', 0.0) * energy_needed
                     
-                    total_swap_service_cost += swap_service
+                    total_swap_service_cost += service_fee
                     total_energy_charging_cost += energy_charging
-                    total_base_fees += base_fee
-                    total_location_premium += location_premium
                     total_degradation += degradation_fee
                     
-                    # Build cost breakdown with only relevant columns
+                    # Build cost breakdown with simplified columns
                     swap_row = {
                         'Station': station_name,
                         'Containers': num_containers,
                         'Energy Charged (kWh)': f"{energy_needed:.0f}",
-                        'Service Fee': f"£{swap_service:.2f}",
+                        'Service Fee': f"£{service_fee:.2f}",
                         'Energy Cost': f"£{energy_charging:.2f}",
-                        'Total': f"£{swap_service + energy_charging + base_fee + location_premium + degradation_fee:.2f}",
+                        'Battery Wear': f"£{degradation_fee:.2f}" if degradation_fee > 0 else "—",
+                        'Total': f"£{service_fee + energy_charging + degradation_fee:.2f}",
                         'Rate': f"£{energy_cost_per_kwh:.3f}/kWh"
                     }
-                    
-                    # Only add hybrid pricing columns if they have non-zero values
-                    if base_fee > 0:
-                        swap_row['Base Fee'] = f"£{base_fee:.2f}"
-                    if location_premium > 0:
-                        swap_row['Location Premium'] = f"£{location_premium:.2f}"
-                    if degradation_fee > 0:
-                        swap_row['Degradation'] = f"£{degradation_fee:.2f}"
                     
                     cost_breakdown.append(swap_row)
             
@@ -1010,7 +1021,7 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                 with col_chart1:
                     # Main cost categories
                     main_costs = {
-                        'Container Service': total_swap_service_cost,
+                        'Service Fee': total_swap_service_cost,
                         'Energy Charging': total_energy_charging_cost,
                     }
                     
@@ -1018,32 +1029,24 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                     if total_hotelling_cost > 0:
                         main_costs['Hotelling Energy'] = total_hotelling_cost
                     
-                    # Add hybrid components if used
-                    if total_base_fees > 0:
-                        main_costs['Base Fees'] = total_base_fees
-                    if total_location_premium > 0:
-                        main_costs['Location Premium'] = total_location_premium
+                    # Add degradation if used
                     if total_degradation > 0:
-                        main_costs['Degradation'] = total_degradation
+                        main_costs['Battery Wear'] = total_degradation
                     
                     main_df = pd.DataFrame(list(main_costs.items()), columns=['Category', 'Cost (£)'])
                     st.bar_chart(main_df.set_index('Category'), height=250)
                 
                 with col_chart2:
                     st.markdown("**💵 Cost Summary**")
-                    st.metric("Container Services", f"£{total_swap_service_cost:.2f}")
+                    st.metric("Service Fees", f"£{total_swap_service_cost:.2f}")
                     st.metric("Energy Charging", f"£{total_energy_charging_cost:.2f}")
                     if total_hotelling_cost > 0:
                         st.metric("Hotelling Energy", f"£{total_hotelling_cost:.2f}")
-                    if total_base_fees > 0:
-                        st.metric("Base Fees", f"£{total_base_fees:.2f}")
-                    if total_location_premium > 0:
-                        st.metric("Location Premiums", f"£{total_location_premium:.2f}")
                     if total_degradation > 0:
-                        st.metric("Degradation Fees", f"£{total_degradation:.2f}")
+                        st.metric("Battery Wear", f"£{total_degradation:.2f}")
                     
                     grand_total_swap = (total_swap_service_cost + total_energy_charging_cost + 
-                                       total_base_fees + total_location_premium + total_degradation + total_hotelling_cost)
+                                       total_degradation + total_hotelling_cost)
                     st.metric("**Grand Total**", f"£{grand_total_swap:.2f}", 
                              help="Total of all swap-related costs including hotelling")
                 
@@ -1062,12 +1065,13 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                 
                 st.info(f"""
                 **💡 Cost Breakdown Explanation:**
-                - **Container Service**: £{total_swap_service_cost:.2f} - Physical swap handling fee
+                - **Service Fees**: £{total_swap_service_cost:.2f} - Swap operations (scales with # containers swapped)
                 - **Energy Charging**: £{total_energy_charging_cost:.2f} - Actual electricity cost for energy recharged{hotelling_note}
+                - **Battery Wear**: £{total_degradation:.2f} - Battery degradation/cycling cost
                 - **Total Swap Costs**: £{grand_total_swap:.2f}
                 
-                **Note**: Energy cost is calculated based on **actual kWh charged**, not full battery capacity.
-                Only the energy needed to recharge from current SoC to 100% is billed.
+                **Note**: Service fee includes physical handling + operations and scales with the number of containers swapped.
+                Energy cost is based on **actual kWh charged** from current SoC to 100%.
                 """)
             else:
                 st.info("✨ **No swaps performed!** Zero swap costs - journey completed on initial charge.")
@@ -1185,7 +1189,7 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                         'Station': detail['station_name'],
                         'SoC Before Swap': f"{detail['soc_before']:.1f} kWh ({remaining_pct:.1f}%)",
                         'Energy Rate': f"£{detail['energy_rate']:.3f}/kWh",
-                        'Service Fee': f"£{detail['swap_service']:.2f}",
+                        'Service Fee': f"£{detail['service_fee']:.2f}",
                         'Energy Cost': f"£{detail['energy_charging']:.2f}",
                         'Total Cost': f"£{detail['total_cost']:.2f}",
                         'Decision': '✅ Swapped'
