@@ -66,57 +66,57 @@ def load_default_config() -> Dict:
     # Generate randomized station configs
     stations = {
         "A": {
-            "min_docking_time_hr": 0.0,
-            "max_docking_time_hr": 0.0,
+            "docking_time_hr": 0.0,  # Origin - no stop
+            "swap_operation_time_hr": 0.5,
             "allow_swap": False,
             "charging_allowed": False,
             "charging_power_kw": 0.0,
         },
         "B": {
-            "min_docking_time_hr": 0.5,
-            "max_docking_time_hr": 8.0,
+            "docking_time_hr": 2.0,  # If mandatory stop: 2 hours for passenger ops
+            "swap_operation_time_hr": 0.5,  # Battery swap: 30 minutes
             "operating_hours": [6.0, 22.0],
             "available_batteries": 5,
             "allow_swap": True,
             "charging_allowed": True,
             "charging_power_kw": 250.0,
-            "charging_fee": 5.0,  # Lower charging fee to make it attractive
-            "energy_cost_per_kwh": 0.08,
-            "base_service_fee": 80.0,  # Higher swap service fee
-            "location_premium": 10.0,
-            "degradation_fee_per_kwh": 0.05,  # Higher degradation cost
+            "base_charging_fee": 25.0,  # UK realistic: £10-£50 per session
+            "energy_cost_per_kwh": 0.25,  # UK realistic: £0.16-£0.40/kWh (typical £0.25)
+            "base_service_fee": 15.0,  # UK realistic: £8-£40 per container (typical £15)
+            "swap_cost": 0.0,
+            "degradation_fee_per_kwh": 0.0,
         },
         "C": {
-            "min_docking_time_hr": 0.5,
-            "max_docking_time_hr": 12.0,
+            "docking_time_hr": 3.0,  # If mandatory: 3 hours for major cargo/passenger ops
+            "swap_operation_time_hr": 0.75,  # Battery swap: 45 minutes
             "operating_hours": [0.0, 24.0],
             "available_batteries": 4,
             "allow_swap": True,
             "charging_allowed": True,
             "charging_power_kw": 500.0,
-            "charging_fee": 8.0,
-            "energy_cost_per_kwh": 0.18,
-            "base_service_fee": 100.0,  # Higher swap cost for 24/7 service
-            "location_premium": 20.0,
-            "degradation_fee_per_kwh": 0.06,
+            "base_charging_fee": 30.0,  # UK realistic: £10-£50 per session
+            "energy_cost_per_kwh": 0.30,  # UK realistic: higher at busy ports
+            "base_service_fee": 20.0,  # UK realistic: £8-£40 per container
+            "swap_cost": 0.0,
+            "degradation_fee_per_kwh": 0.0,
         },
         "D": {
-            "min_docking_time_hr": 0.5,
-            "max_docking_time_hr": 6.0,
+            "docking_time_hr": 2.0,  # If mandatory: 2 hours
+            "swap_operation_time_hr": 0.5,  # Battery swap: 30 minutes
             "operating_hours": [8.0, 20.0],
             "available_batteries": 12,
             "allow_swap": True,
             "charging_allowed": True,
             "charging_power_kw": 350.0,
-            "charging_fee": 6.0,
-            "energy_cost_per_kwh": 0.11,
-            "base_service_fee": 70.0,  # Moderate swap cost
-            "location_premium": 8.0,
-            "degradation_fee_per_kwh": 0.04,
+            "base_charging_fee": 20.0,  # UK realistic: £10-£50 per session
+            "energy_cost_per_kwh": 0.22,  # UK realistic: £0.16-£0.40/kWh
+            "base_service_fee": 18.0,  # UK realistic: £8-£40 per container
+            "swap_cost": 0.0,
+            "degradation_fee_per_kwh": 0.0,
         },
         "E": {
-            "min_docking_time_hr": 0.0,
-            "max_docking_time_hr": 0.0,
+            "docking_time_hr": 0.0,  # Pass-through only
+            "swap_operation_time_hr": 0.5,
             "allow_swap": False,
             "charging_allowed": False,
             "charging_power_kw": 0.0,
@@ -128,8 +128,7 @@ def load_default_config() -> Dict:
     for station in station_names:
         if station in ["K", "P"]:  # Make some stations non-swap for variety
             stations[station] = {
-                "min_docking_time_hr": 0.0,
-                "max_docking_time_hr": 0.0,
+                "docking_time_hr": 0.0,
                 "allow_swap": False,
                 "charging_allowed": False,
                 "charging_power_kw": 0.0,
@@ -156,24 +155,23 @@ def load_default_config() -> Dict:
             charging_power = random.choice([0.0, 250.0, 350.0, 500.0, 750.0])  # Some stations have no charging
             
             stations[station] = {
-                "min_docking_time_hr": round(random.uniform(0.5, 1.0), 2),
-                "max_docking_time_hr": round(random.uniform(4.0, 12.0), 1),
+                "docking_time_hr": round(random.uniform(1.5, 3.0), 2),  # Mandatory stop duration if needed
+                "swap_operation_time_hr": round(random.uniform(0.25, 1.0), 2),  # Battery swap: 15 min - 1 hour
                 "operating_hours": [0.0, 24.0] if is_24_7 else [random.randint(5, 9), random.randint(16, 23)],
                 "available_batteries": batteries_available,
                 "allow_swap": True,
                 "charging_allowed": charging_power > 0,
                 "charging_power_kw": charging_power,
-                "charging_fee": round(random.uniform(8.0, 18.0), 1) if charging_power > 0 else 0.0,
+                "base_charging_fee": round(random.uniform(10.0, 50.0), 1) if charging_power > 0 else 0.0,  # UK realistic: £10-£50
                 "energy_cost_per_kwh": round(energy_rate, 3),
-                "base_service_fee": round(random.uniform(60.0, 100.0), 1),  # Higher swap fees to make charging competitive
-                "location_premium": round(random.uniform(5.0, 20.0), 1),
-                "degradation_fee_per_kwh": round(random.uniform(0.03, 0.06), 3),  # Higher degradation fees
+                "base_service_fee": round(random.uniform(8.0, 40.0), 1),  # UK realistic: £8-£40 per container
+                "swap_cost": 0.0,
+                "degradation_fee_per_kwh": 0.0,
             }
     
     # T is always destination (no swap)
     stations["T"] = {
-        "min_docking_time_hr": 0.0,
-        "max_docking_time_hr": 0.0,
+        "docking_time_hr": 0.0,
         "allow_swap": False,
         "charging_allowed": False,
         "charging_power_kw": 0.0,
@@ -311,14 +309,15 @@ def build_inputs(config: Dict) -> FixedPathInputs:
         stations.append(
             Station(
                 name=name,
-                min_docking_time_hr=float(station_cfg.get("min_docking_time_hr", 0.5)),
-                max_docking_time_hr=float(station_cfg.get("max_docking_time_hr")) if station_cfg.get("max_docking_time_hr") else None,
+                docking_time_hr=float(station_cfg.get("docking_time_hr", 2.0)),
+                swap_operation_time_hr=float(station_cfg.get("swap_operation_time_hr", 0.5)),
+                mandatory_stop=_safe_bool(station_cfg.get("mandatory_stop", False), default=False),
                 operating_hours=operating_tuple,
                 available_batteries=_safe_int(station_cfg.get("available_batteries")),
                 allow_swap=_safe_bool(station_cfg.get("allow_swap", True), default=True),
                 force_swap=_safe_bool(station_cfg.get("force_swap", False), default=False),
                 partial_swap_allowed=_safe_bool(station_cfg.get("partial_swap_allowed", False), default=False),
-                energy_cost_per_kwh=float(station_cfg.get("energy_cost_per_kwh", 0.09)),
+                energy_cost_per_kwh=float(station_cfg.get("energy_cost_per_kwh", 0.25)),  # UK realistic: £0.16-£0.40/kWh
                 # Charging infrastructure
                 charging_power_kw=float(station_cfg.get("charging_power_kw", 0.0)),
                 charging_efficiency=float(station_cfg.get("charging_efficiency", 0.95)),
@@ -408,7 +407,7 @@ def config_to_form_frames(config: Dict) -> Tuple[pd.DataFrame, pd.DataFrame]:
                 "Open Hour": operating[0] if operating else 0.0,
                 "Close Hour": operating[1] if operating else 24.0,
                 "Available Batteries": station_cfg.get("available_batteries", pd.NA),
-                "Energy Cost (£/kWh)": station_cfg.get("energy_cost_per_kwh", 0.09),
+                "Energy Cost (£/kWh)": station_cfg.get("energy_cost_per_kwh", 0.25),  # UK realistic
             }
         )
     stations_df = pd.DataFrame(station_rows)
@@ -464,12 +463,13 @@ def form_frames_to_config(
         close_hour = _safe_float(record.get("Close Hour"), 24.0)
             
         cfg: Dict[str, object] = {
+            "mandatory_stop": _safe_bool(record.get("Mandatory Stop"), default=False),
             "allow_swap": _safe_bool(record.get("Allow Swap"), default=True),
             "force_swap": _safe_bool(record.get("Force Swap"), default=False),
             "partial_swap_allowed": _safe_bool(record.get("Partial Swap"), default=False),
             "charging_allowed": _safe_bool(record.get("Charging Allowed"), default=False),
-            "min_docking_time_hr": _safe_float(record.get("Min Docking (hr)"), 0.5),
-            "max_docking_time_hr": _safe_float(record.get("Max Docking (hr)"), 4.0),
+            "docking_time_hr": _safe_float(record.get("Docking Time (hr)"), 2.0),
+            "swap_operation_time_hr": _safe_float(record.get("Swap Operation Time (hr)"), 0.5),
             "charging_power_kw": _safe_float(record.get("Charging Power (kW)"), 0.0),
             "operating_hours": [open_hour, close_hour],
             "energy_cost_per_kwh": _safe_float(record.get("Energy Cost (£/kWh)"), 0.09),
@@ -478,19 +478,15 @@ def form_frames_to_config(
             # This ensures pricing is preserved even if not shown in UI
             "base_service_fee": _safe_float(
                 record.get("Base Service Fee"), 
-                default_station_pricing.get("base_service_fee", 80.0)  # Default swap fee
+                default_station_pricing.get("base_service_fee", 8.0)  # Default service fee
             ),
-            "location_premium": _safe_float(
-                record.get("Location Premium"), 
-                default_station_pricing.get("location_premium", 10.0)  # Default location premium
+            "swap_cost": _safe_float(
+                record.get("Swap Cost"), 
+                default_station_pricing.get("swap_cost", 0.0)  # Default swap cost
             ),
             "degradation_fee_per_kwh": _safe_float(
                 record.get("Degradation Fee"), 
-                default_station_pricing.get("degradation_fee_per_kwh", 0.05)  # Default degradation
-            ),
-            "subscription_discount": _safe_float(
-                record.get("Subscription Discount"), 
-                default_station_pricing.get("subscription_discount", 0.0)
+                default_station_pricing.get("degradation_fee_per_kwh", 0.0)  # Default degradation
             ),
             "base_charging_fee": _safe_float(
                 record.get("Charging Fee (£)"), 
@@ -557,7 +553,7 @@ def run_optimizer(config: Dict) -> Tuple[pd.DataFrame, Dict[str, object]]:
                 "Energy Charged (kWh)": step.energy_charged_kwh,
                 "Arrival (hr)": step.arrival_time_hr,
                 "Departure (hr)": step.departure_time_hr,
-                "Dwell (hr)": step.station_docking_time_hr,  # Time spent at port
+                "Berth Time (hr)": step.station_docking_time_hr,  # Total time at berth (includes all operations)
                 "Travel (hr)": step.travel_time_hr,
                 "SoC Before (kWh)": step.soc_before_kwh,
                 "SoC After Operation (kWh)": step.soc_after_operation_kwh,
@@ -648,7 +644,7 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                     'energy_rate': station_config.get('energy_cost_per_kwh', 0.09),
                     'swap_time': station_config.get('swap_time_hr', 0),
                     'partial_swap_allowed': station_config.get('partial_swap_allowed', False),
-                    'dwell_time': row.get('Dwell (hr)', 0),
+                    'berth_time': row.get('Berth Time (hr)', 0),
                 })
     
     # Total of all swap-related costs
@@ -665,7 +661,7 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
 
     # Key Metrics Row
     st.markdown("### 📊 Journey Summary")
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
         st.metric(
             "💰 Total Cost", 
@@ -679,12 +675,27 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
             help="Total journey time including docking and travel"
         )
     with col3:
+        # Calculate total berth time (time spent at stations)
+        total_berth_hours = 0.0
+        if not steps_df.empty:
+            for _, row in steps_df.iterrows():
+                # Add berth time for all stations where vessel stops
+                berth_time = row.get('Berth Time (hr)', 0.0)
+                if berth_time > 0:
+                    total_berth_hours += berth_time
+        
+        st.metric(
+            "⚓ Total Berth Time", 
+            f"{total_berth_hours:.2f} hrs",
+            help="Total hours spent at berth (includes swaps, charges, mandatory stops, passenger/cargo operations)"
+        )
+    with col4:
         st.metric(
             "🕐 Arrival Time", 
             f"{totals['finish_time']:.2f} hrs",
             help="Clock time when journey completes"
         )
-    with col4:
+    with col5:
         swaps_count = steps_df[steps_df['Swap'] == True].shape[0] if not steps_df.empty else 0
         charges_count = steps_df[steps_df['Charged'] == True].shape[0] if not steps_df.empty else 0
         st.metric(
@@ -741,7 +752,7 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                     'Station': detail['station_name'],
                     'Mode': swap_mode,
                     'Containers': detail['num_containers'],
-                    'Dwell Time': f"{detail['dwell_time']:.2f} hr",
+                    'Berth Time': f"{detail['berth_time']:.2f} hr",
                     'Returned SoC': f"{detail['soc_before']:.0f} kWh ({soc_before_pct:.0f}%)",
                     'Energy Charged': f"{detail['energy_needed']:.0f} kWh",
                     'Hotelling': f"{detail['hotelling_energy']:.0f} kWh" if detail['hotelling_energy'] > 0 else "—",
@@ -761,7 +772,7 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                 
                 hotelling_info = ""
                 if total_hotelling_cost > 0:
-                    hotelling_info = f"\n\n⚡ **Hotelling Energy**: {vessel_type_display} ({vessel_gt_display:,.0f} GT) consumed energy for onboard services (HVAC, lighting, etc.) during dwell time at berth. Total hotelling cost: £{total_hotelling_cost:.2f}"
+                    hotelling_info = f"\n\n⚡ **Hotelling Energy**: {vessel_type_display} ({vessel_gt_display:,.0f} GT) consumed energy for onboard services (HVAC, lighting, etc.) during berth time. Total hotelling cost: £{total_hotelling_cost:.2f}"
                 
                 # Calculate partial vs full swap info
                 total_num_containers = int(battery_cap / config.get('battery_container_capacity_kwh', 1960))
@@ -770,6 +781,8 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                 if partial_swap_stations:
                     swap_mode_info = f"\n\n🔄 **Partial Swap Active**: Swapping only depleted containers (vs. full set of {total_num_containers} BC). This reduces service fees significantly!"
                 
+                berth_time_info = "\n\n⏱️ **Berth Time**: Total time vessel is docked at station, includes swap operations, passenger boarding/offloading, cargo operations, and any mandatory stop requirements."
+                
                 st.info(f"""
                 📦 **Total Battery Containers Swapped**: {total_containers_swapped} BC across {len(swap_cost_details)} station(s)
                 
@@ -777,7 +790,7 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                 • **Service Fee**: £{total_swap_service_cost:.2f} - Swap operations (scales with # containers)
                 • **Energy Cost**: £{total_energy_charging_cost:.2f} - Electricity for charging (SoC-based billing)
                 • **Battery Wear**: £{total_degradation:.2f} - Battery degradation/cycling cost
-                • **Hotelling**: £{total_hotelling_cost:.2f} - Onboard services energy (HVAC, lights, pumps, etc.){hotelling_info}{swap_mode_info}
+                • **Hotelling**: £{total_hotelling_cost:.2f} - Onboard services energy (HVAC, lights, pumps, etc.){hotelling_info}{swap_mode_info}{berth_time_info}
                 """)
                 
                 st.dataframe(
@@ -811,7 +824,7 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                     "Charged": st.column_config.CheckboxColumn("Charged?", width="tiny"),
                     "Arrival (hr)": st.column_config.NumberColumn("Arrival", format="%.2f hr"),
                     "Departure (hr)": st.column_config.NumberColumn("Departure", format="%.2f hr"),
-                    "Docking (hr)": st.column_config.NumberColumn("Docking", format="%.2f hr"),
+                    "Berth Time (hr)": st.column_config.NumberColumn("Berth Time", format="%.2f hr", help="Total time at berth including all operations"),
                     "Travel (hr)": st.column_config.NumberColumn("Travel", format="%.2f hr"),
                     "SoC Before (kWh)": st.column_config.NumberColumn("SoC Before", format="%.1f kWh"),
                     "SoC After Operation (kWh)": st.column_config.NumberColumn("SoC After Op", format="%.1f kWh"),
@@ -1242,7 +1255,7 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
         
         with col3:
             # Create summary report
-            summary = f"""Riverboat Journey Summary
+            summary = f"""Marine Vessels Journey Summary
 {'='*50}
 Total Cost: £{totals['total_cost']:.2f}
 Total Time: {totals['total_time']:.2f} hours
@@ -1265,13 +1278,13 @@ Maximum SoC: {max_soc:.1f} kWh
 
 def main() -> None:
     st.set_page_config(
-        page_title="Riverboat Battery Swapping", 
+        page_title="Marine Vessels Battery Swapping", 
         layout="wide",
         page_icon="🚢",
         initial_sidebar_state="expanded"
     )
     
-    st.title("🚢 Riverboat Battery Swapping Optimiser")
+    st.title("🚢 Marine Vessels Battery Swapping Optimiser")
     st.markdown("---")
 
     default_config = load_default_config()
@@ -1335,22 +1348,17 @@ def main() -> None:
             default_consumption = 50.0
             default_speed = 10.0
         
-        # Auto-calculate recommended docking times
+        # Auto-calculate recommended docking times based on vessel type
         if vessel_type in [VesselType.CARGO_CONTAINER, VesselType.BULK_CARRIER]:
-            recommended_min_docking = 1.0
-            recommended_max_docking = 8.0
+            recommended_docking_time = 2.0  # hours
         elif vessel_type in [VesselType.TANKER, VesselType.CRUDE_OIL_TANKER]:
-            recommended_min_docking = 1.5
-            recommended_max_docking = 10.0
+            recommended_docking_time = 2.5  # hours
         elif vessel_type in [VesselType.PASSENGER_FERRY]:
-            recommended_min_docking = 0.5
-            recommended_max_docking = 4.0
+            recommended_docking_time = 1.0  # hours - faster turnaround
         elif vessel_type in [VesselType.SERVICE_VESSELS, VesselType.OFFSHORE_SUPPLY]:
-            recommended_min_docking = 0.5
-            recommended_max_docking = 6.0
+            recommended_docking_time = 1.5  # hours
         else:
-            recommended_min_docking = 0.5
-            recommended_max_docking = 6.0
+            recommended_docking_time = 2.0  # hours - default
         
         st.markdown("---")
         
@@ -1398,7 +1406,7 @@ def main() -> None:
         
         # Key Metrics Display
         st.info(f"⚡ **Hotelling Power:** {hotelling_power:,.0f} kW  |  "
-                f"⏱️ **Recommended Docking:** {recommended_min_docking}h - {recommended_max_docking}h")
+                f"⏱️ **Average Docking Time:** {recommended_docking_time} hours")
         
         st.markdown("---")
         
@@ -1498,31 +1506,18 @@ def main() -> None:
         # SECTION 4: Journey Settings (Grouped together)
         st.markdown("### 4️⃣ Journey Settings")
         
-        col1, col2, col3 = st.columns(3)
+        start_time = st.number_input(
+            "**Departure Time (24h)**",
+            min_value=0.0,
+            max_value=23.5,
+            value=8.0,
+            step=0.5,
+            key="departure_time_hr",
+            help="Journey start time"
+        )
         
-        with col1:
-            start_time = st.number_input(
-                "**Departure Time (24h)**",
-                min_value=0.0,
-                max_value=23.5,
-                value=8.0,
-                step=0.5,
-                key="departure_time_hr",
-                help="Journey start time"
-            )
-        
-        with col2:
-            soc_step = st.number_input(
-                "**SoC Precision (kWh)**",
-                min_value=5.0,
-                max_value=50.0,
-                value=20.0,
-                step=5.0,
-                help="Lower = more precise, slower"
-            )
-        
-        with col3:
-            st.metric("**Chemistry**", "LFP", help="Lithium Iron Phosphate - marine standard")
+        # Hidden - use fixed SoC precision internally
+        soc_step = 10.0  # Fixed at 20 kWh for optimal balance
         
         # Advanced Details (Collapsed by default)
         with st.expander("� **Detailed Performance Metrics**", expanded=False):
@@ -1545,76 +1540,7 @@ def main() -> None:
                 st.write(f"- Consumption: {base_consumption:.1f} kWh/NM")
                 st.write(f"- Hotelling: {hotelling_power:,.0f} kW")
         
-        # Reference Data (Collapsed by default)
-        with st.expander("📖 **Industry Benchmarks & Reference Data**", expanded=False):
-            
-            tab1, tab2 = st.tabs(["Energy Consumption", "Hotelling Power"])
-            
-            with tab1:
-                st.markdown("""
-                **Energy Consumption per Nautical Mile**
-                
-                | Vessel Type | kWh/NM | Typical GT | Speed |
-                |-------------|--------|------------|-------|
-                | Ferry | 83-100 | 2,000 | 12-15 kts |
-                | Tug | 233-350 | 1,500 | 8-10 kts |
-                | Cargo | 30-50 | 4,000 | 10-12 kts |
-                | Container | 40-60 | 5,000 | 12-14 kts |
-                | Tanker | 60-80 | 8,000 | 10-12 kts |
-                """)
-                st.caption(f"✓ Your setting: **{base_consumption:.1f} kWh/NM** for {vessel_type.value}")
-            
-            with tab2:
-                st.markdown(f"""
-                **Hotelling Power at Berth**
-                
-                Power consumed for onboard services (HVAC, lighting, pumps, etc.) while docked.
-                
-                **Your Vessel:** {vessel_type.value} ({vessel_gt:,} GT) = **{hotelling_power:,.0f} kW**
-                
-                **Cost Impact:** During a 1.5 hour swap, vessel consumes {hotelling_power * 1.5:,.0f} kWh 
-                just for onboard services.
-                """)
-                
-                if COLD_IRONING_AVAILABLE:
-                    st.markdown("---")
-                    st.markdown("**Industry Data (Cold-Ironing/Shore Power)**")
-                    try:
-                        gt_ranges = get_gt_range_info(vessel_type.value)
-                        if gt_ranges:
-                            range_data = []
-                            for range_desc, power_kw in gt_ranges:
-                                is_current = ""
-                                parts = range_desc.replace(" GT", "").split(" - ")
-                                if len(parts) == 2:
-                                    min_val = float(parts[0].replace(",", ""))
-                                    max_val_str = parts[1].replace(",", "")
-                                    max_val = float('inf') if max_val_str == "999,999,999" else float(max_val_str)
-                                    if min_val <= vessel_gt < max_val:
-                                        is_current = " ← You are here"
-                                
-                                range_data.append({
-                                    "GT Range": range_desc,
-                                    "Power (kW)": f"{power_kw:,.0f}",
-                                    "": is_current
-                                })
-                            
-                            ranges_df = pd.DataFrame(range_data)
-                            st.dataframe(ranges_df, hide_index=True, width='stretch')
-                    except Exception:
-                        pass
-                    
-                    st.caption("📚 Sources: EU Shore Power Studies, IMO/IAPH Port Analysis")
-                
-                st.markdown("""
-                
-                **Typical Power Ranges:**
-                - Cruise Ship: 9-11 MW (70% load factor)
-                - Tanker: 5-10 MW (60% load factor)
-                - Ferry: 5-7 MW (65% load factor)
-                - Container: 1-5 MW (50% load factor)
-                - Cargo: 0.5-3 MW (40% load factor)
-                """)
+        # Reference Data (Hidden for simplified UI - removed)
 
     with st.sidebar:
         st.header("⚙️ Configuration")
@@ -1754,31 +1680,20 @@ def main() -> None:
             # QUICK SETTINGS - Apply to All
             st.markdown("#### ⚡ Quick Apply to All Stations")
             
-            col1, col2, col3, col4 = st.columns(4)
+            col1, col2, col3 = st.columns(3)
             
             with col1:
-                global_min_docking = st.number_input(
-                    "**Min Docking (hr)**",
+                global_docking_time = st.number_input(
+                    "**Docking Time (hr)**",
                     min_value=0.0,
-                    max_value=4.0,
-                    value=recommended_min_docking,
+                    max_value=12.0,
+                    value=recommended_docking_time,
                     step=0.25,
-                    key="global_min_docking",
-                    help=f"Recommended: {recommended_min_docking}h"
+                    key="global_docking_time",
+                    help=f"Recommended: {recommended_docking_time}h for {vessel_type.value}"
                 )
             
             with col2:
-                global_max_docking = st.number_input(
-                    "**Max Docking (hr)**",
-                    min_value=0.5,
-                    max_value=12.0,
-                    value=recommended_max_docking,
-                    step=0.5,
-                    key="global_max_docking",
-                    help=f"Recommended: {recommended_max_docking}h"
-                )
-            
-            with col3:
                 global_charging_power = st.number_input(
                     "**Charging (kW)**",
                     min_value=0.0,
@@ -1789,7 +1704,7 @@ def main() -> None:
                     help="Shore power capacity"
                 )
             
-            with col4:
+            with col3:
                 global_partial_swap = st.checkbox(
                     "**Partial Swap**",
                     value=False,
@@ -1817,6 +1732,14 @@ def main() -> None:
                     
                     with col_left:
                         st.markdown("**⚙️ Operations**")
+                        
+                        # Mandatory stop - vessel must dock here regardless of battery needs
+                        mandatory_stop = st.checkbox(
+                            "Mandatory Stop",
+                            value=default_station.get("mandatory_stop", idx == 0 or idx == len(station_names) - 1),
+                            key=f"mandatory_{name}",
+                            help="Vessel MUST dock here (scheduled stop, passenger pickup, etc.). Optimizer will decide what action to take."
+                        )
                         
                         allow_swap = st.checkbox(
                             "Allow Swap",
@@ -1874,24 +1797,16 @@ def main() -> None:
                         )
                     
                     with col_right:
-                        st.markdown("**⏱️ Docking Times**")
+                        st.markdown("**⏱️ Operations**")
                         
-                        station_min_docking = st.number_input(
-                            "Min Docking (hr)",
+                        station_docking_time = st.number_input(
+                            "Docking Time (hr)",
                             min_value=0.0,
-                            max_value=4.0,
-                            value=global_min_docking,
-                            step=0.25,
-                            key=f"min_docking_{name}_{global_min_docking}"
-                        )
-                        
-                        station_max_docking = st.number_input(
-                            "Max Docking (hr)",
-                            min_value=0.5,
                             max_value=12.0,
-                            value=global_max_docking,
-                            step=0.5,
-                            key=f"max_docking_{name}_{global_max_docking}"
+                            value=global_docking_time,
+                            step=0.25,
+                            key=f"docking_time_{name}_{global_docking_time}",
+                            help="Duration for operations: battery swap (30 min - 1 hr), charging (variable), or mandatory stop duration. Set to 0.0 for pass-through stations."
                         )
                         
                         st.markdown("**🔌 Charging & Batteries**")
@@ -1905,13 +1820,23 @@ def main() -> None:
                             key=f"charging_power_{name}_{global_charging_power}"
                         )
                         
+                        # Show charging capacity info
+                        if station_charging_power > 0 and station_docking_time > 0:
+                            max_energy_charged = station_charging_power * station_docking_time * 0.95
+                            pct_of_battery = (max_energy_charged / battery_capacity * 100) if battery_capacity > 0 else 0
+                            if pct_of_battery < 100:
+                                st.caption(f"⚡ Can charge ~{max_energy_charged:.0f} kWh in {station_docking_time}h ({pct_of_battery:.1f}% of battery)")
+                            else:
+                                st.caption(f"⚡ Can fully charge battery in {station_docking_time}h")
+                        
                         station_charging_fee = st.number_input(
                             "Charging Fee (£)",
                             min_value=0.0,
                             max_value=100.0,
-                            value=10.0,
-                            step=1.0,
-                            key=f"charging_fee_{name}"
+                            value=25.0,  # UK realistic: £10-£50 per session
+                            step=5.0,
+                            key=f"charging_fee_{name}",
+                            help="UK realistic: £10-£50 per charging session"
                         )
                         
                         batteries = st.number_input(
@@ -1928,22 +1853,22 @@ def main() -> None:
                             "£/kWh",
                             min_value=0.0,
                             max_value=1.0,
-                            value=default_station.get("energy_cost_per_kwh", 0.09),
+                            value=default_station.get("energy_cost_per_kwh", 0.25),  # UK realistic: £0.16-£0.40/kWh
                             step=0.01,
                             format="%.3f",
                             key=f"energy_cost_{name}",
-                            help="Local electricity price"
+                            help="UK realistic: £0.16-£0.40/kWh (typical £0.25)"
                         )
                     
                     # Collect data from UI elements
                     station_rows.append({
                         "Station": name,
+                        "Mandatory Stop": mandatory_stop,
                         "Allow Swap": allow_swap,
                         "Force Swap": force_swap,
                         "Partial Swap": partial_swap,
                         "Charging Allowed": charging_allowed,
-                        "Min Docking (hr)": station_min_docking,
-                        "Max Docking (hr)": station_max_docking,
+                        "Docking Time (hr)": station_docking_time,
                         "Charging Power (kW)": station_charging_power,
                         "Charging Fee (£)": station_charging_fee,
                         "Open Hour": open_hour,
@@ -2033,9 +1958,8 @@ def main() -> None:
                     
                     status.update(label="✅ **Optimisation Complete!**", state="complete")
                     
-                    # Show success message with vessel animation
+                    # Show success message
                     st.toast("🚢 Vessel departing!", icon="🚢")
-                    st.balloons()  # Keep balloons for celebration effect
                     st.success(f"""
                     ### 🎉 Optimisation Successful!
                     

@@ -154,25 +154,26 @@ class Segment:
 @dataclass(frozen=True)
 class Station:
     name: str
-    min_docking_time_hr: float = 0.5  # Minimum docking time for port operations (business-driven)
-    max_docking_time_hr: Optional[float] = None  # Maximum allowed docking time (port constraints)
+    docking_time_hr: float = 2.0  # Time for MANDATORY stops (passenger ops, cargo, scheduled stops)
+    swap_operation_time_hr: float = 0.5  # Time for battery swap operation (typically 30 min - 1 hr)
+    mandatory_stop: bool = False  # If True, vessel MUST dock for docking_time_hr regardless of battery needs
     allow_swap: bool = True
     force_swap: bool = False
     partial_swap_allowed: bool = False  # If True, can swap only depleted containers; if False, must swap all
     operating_hours: Optional[Tuple[float, float]] = None
     available_batteries: Optional[int] = None
-    energy_cost_per_kwh: float = 0.09  # Station-specific energy pricing (default: Guangzhou/Zhao Qing rate)
+    energy_cost_per_kwh: float = 0.25  # Station-specific energy pricing (UK realistic: £0.16-£0.40/kWh, typical £0.25)
     
     # Charging Infrastructure
     charging_power_kw: float = 0.0  # Available shore power charging capacity (kW)
     charging_efficiency: float = 0.95  # Charging efficiency (AC/DC conversion losses)
     charging_allowed: bool = False  # Whether charging infrastructure is available
     
-    # Hybrid/Custom Pricing Components (Current Direct-style model)
+    # Hybrid/Custom Pricing Components (UK Realistic Costs)
     swap_cost: float = 0.0  # Per-container swap handling fee (scales with number of containers)
-    base_service_fee: float = 8.0  # Base service fee per container (default: £8/container)
+    base_service_fee: float = 15.0  # Base service fee per container (UK realistic: £8-£40, typical £15)
     degradation_fee_per_kwh: float = 0.0  # Charge based on battery wear/degradation
-    base_charging_fee: float = 0.0  # Fixed fee for using charging infrastructure
+    base_charging_fee: float = 25.0  # Fixed fee for using charging infrastructure (UK realistic: £10-£50, typical £25)
 
 
 @dataclass(frozen=True)
@@ -209,10 +210,8 @@ class FixedPathInputs:
         if self.final_soc_min_kwh < self.min_soc_kwh:
             raise ValueError("final SoC requirement cannot be below minimum operating SoC")
         for station in self.stations:
-            if station.min_docking_time_hr < 0:
-                raise ValueError(f"Station {station.name} minimum docking time must be non-negative")
-            if station.max_docking_time_hr is not None and station.max_docking_time_hr < station.min_docking_time_hr:
-                raise ValueError(f"Station {station.name} maximum docking time must be >= minimum")
+            if station.docking_time_hr < 0:
+                raise ValueError(f"Station {station.name} docking time must be non-negative")
             if station.available_batteries is not None and station.available_batteries < 0:
                 raise ValueError(f"Station {station.name} available batteries cannot be negative")
             if station.charging_power_kw < 0:
@@ -413,11 +412,20 @@ class FixedPathOptimizer:
         if self.inputs.vessel_specs is not None:
             hotelling_power_kw = self.inputs.vessel_specs.get_hotelling_power_kw()
 
-        # OPTION 1: No operation - pass through without stopping
+        # OPTION 1: No operation
+        # If mandatory_stop=True: vessel MUST dock but may not need any action
+        # If mandatory_stop=False: only dock if optimizer decides to take action
         if not station.force_swap:
-            # No docking time when just passing through
-            dwell_time_no_op = 0.0
-            hotelling_energy_no_op = 0.0  # No hotelling if not docked
+            if station.mandatory_stop:
+                # Mandatory stop: vessel docks for the specified docking time
+                # Hotelling power consumed during docking, but no other operations
+                dwell_time_no_op = station.docking_time_hr
+                hotelling_energy_no_op = hotelling_power_kw * dwell_time_no_op
+            else:
+                # Optional stop: pass through without docking if no action needed
+                dwell_time_no_op = 0.0
+                hotelling_energy_no_op = 0.0
+            
             options.append((level, 0.0, dwell_time_no_op, False, False, "none", 0, 0.0, hotelling_energy_no_op))
 
         # OPTION 2: Full/Partial Swap Only
@@ -449,7 +457,12 @@ class FixedPathOptimizer:
                 # Not enough batteries - skip this swap option
             else:
                 capacity_level = self._capacity_steps
-                swap_time = station.min_docking_time_hr  # Use minimum docking time for swap
+                
+                # Determine berth time: use mandatory stop time if applicable, otherwise swap operation time
+                if station.mandatory_stop:
+                    swap_time = station.docking_time_hr  # Mandatory stop: must stay for full docking time
+                else:
+                    swap_time = station.swap_operation_time_hr  # Energy-only stop: quick swap operation
                 
                 # Simplified swap cost calculation
                 # Service fee scales with number of containers (includes handling + operations)
@@ -481,17 +494,14 @@ class FixedPathOptimizer:
 
         # OPTION 3: Charging Only (variable duration)
         if station.charging_allowed and station.charging_power_kw > 0 and not station.force_swap:
-            max_dwell = station.max_docking_time_hr if station.max_docking_time_hr is not None else 24.0
-            
             # Discrete charging time options (in hours)
             charge_time_options = [0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0]
             
+            # If mandatory stop, add the docking time as a charging option
+            if station.mandatory_stop and station.docking_time_hr not in charge_time_options:
+                charge_time_options = sorted(charge_time_options + [station.docking_time_hr])
+            
             for charge_time in charge_time_options:
-                if charge_time < station.min_docking_time_hr:
-                    continue  # Must meet minimum docking time
-                if charge_time > max_dwell:
-                    continue  # Cannot exceed maximum docking time
-                
                 # Calculate energy charged
                 energy_charged_kwh = min(
                     charge_time * station.charging_power_kw * station.charging_efficiency,
@@ -528,15 +538,13 @@ class FixedPathOptimizer:
 
         # OPTION 4: Hybrid (Swap + Charge)
         if station.allow_swap and station.charging_allowed and station.charging_power_kw > 0:
-            max_dwell = station.max_docking_time_hr if station.max_docking_time_hr is not None else 24.0
-            
             # Hybrid time options: short charge after swap
             hybrid_charge_times = [0.5, 1.0, 2.0, 3.0, 4.0]
             
             for charge_time in hybrid_charge_times:
-                total_time = station.min_docking_time_hr + charge_time
-                if total_time > max_dwell:
-                    continue
+                # Determine base time: mandatory stop uses docking time, otherwise swap operation time
+                base_time = station.docking_time_hr if station.mandatory_stop else station.swap_operation_time_hr
+                total_time = base_time + charge_time
                 
                 # Calculate swap portion (same as full swap)
                 total_num_containers = int(capacity_kwh / self.inputs.battery_container_capacity_kwh)
@@ -848,17 +856,6 @@ class FixedPathOptimizer:
             diagnostics.append(f"  ❌ Final SoC requirement ({inputs.final_soc_min_kwh:.1f} kWh) > Battery capacity ({inputs.battery_capacity_kwh:.1f} kWh)")
             diagnostics.append(f"     SOLUTION: Reduce final_soc_min_kwh or increase battery_capacity_kwh")
         
-        # Check for stations with impossible operating windows
-        for station in inputs.stations:
-            if station.max_docking_time_hr is not None and station.max_docking_time_hr < station.min_docking_time_hr:
-                diagnostics.append(f"  ❌ Station {station.name}: max_docking_time < min_docking_time")
-                diagnostics.append(f"     SOLUTION: Fix docking time constraints")
-            
-            if station.allow_swap and station.max_docking_time_hr is not None:
-                if station.max_docking_time_hr < station.min_docking_time_hr:
-                    diagnostics.append(f"  ❌ Station {station.name}: Insufficient time for swap operations")
-                    diagnostics.append(f"     SOLUTION: Increase max_docking_time_hr")
-        
         # 5. Suggested actions
         diagnostics.append("\n\nSUGGESTED ACTIONS:")
         diagnostics.append("  1. Enable swap/charging at more intermediate stations")
@@ -867,7 +864,7 @@ class FixedPathOptimizer:
         diagnostics.append("  4. Check operating hours aren't too restrictive")
         diagnostics.append("  5. Ensure sufficient batteries available at swap stations")
         diagnostics.append("  6. Increase charging power (charging_power_kw) at charging stations")
-        diagnostics.append("  7. Increase max_docking_time_hr to allow for longer charging sessions")
+        diagnostics.append("  7. Adjust docking_time_hr to allow for proper operations")
         
         return "\n".join(diagnostics)
 
@@ -942,16 +939,14 @@ if __name__ == "__main__":
     stations = [
         Station(
             name="A", 
-            min_docking_time_hr=0.0, 
-            max_docking_time_hr=0.0,
+            docking_time_hr=0.0,
             allow_swap=False, 
             charging_allowed=False,
             energy_cost_per_kwh=0.09
         ),
         Station(
             name="B",
-            min_docking_time_hr=0.5,
-            max_docking_time_hr=4.0,
+            docking_time_hr=2.0,
             operating_hours=(6.0, 22.0),
             available_batteries=3,
             allow_swap=True,
@@ -965,8 +960,7 @@ if __name__ == "__main__":
         ),
         Station(
             name="C",
-            min_docking_time_hr=1.0,
-            max_docking_time_hr=8.0,
+            docking_time_hr=2.5,
             operating_hours=(0.0, 24.0),
             available_batteries=2,
             allow_swap=True,
@@ -977,12 +971,10 @@ if __name__ == "__main__":
             energy_cost_per_kwh=0.18,  # Hong Kong: 1.443 HKD (~$0.18/kWh)
             base_service_fee=40.0,
             base_charging_fee=20.0,
-            location_premium=15.0,
         ),
         Station(
             name="D",
-            min_docking_time_hr=0.5,
-            max_docking_time_hr=6.0,
+            docking_time_hr=1.5,
             operating_hours=(8.0, 20.0),
             available_batteries=4,
             allow_swap=True,
@@ -996,8 +988,7 @@ if __name__ == "__main__":
         ),
         Station(
             name="E", 
-            min_docking_time_hr=0.0,
-            max_docking_time_hr=0.0,
+            docking_time_hr=0.0,
             allow_swap=False, 
             charging_allowed=False,
             energy_cost_per_kwh=0.09
