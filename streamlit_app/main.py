@@ -1454,7 +1454,12 @@ def main() -> None:
         battery_weight_tonnes = battery_weight_kg / 1000
         max_range = battery_capacity / base_consumption if base_consumption > 0 else 0
         usable_battery = battery_capacity * (1 - minimum_soc)
-        usable_range = usable_battery / base_consumption if base_consumption > 0 else 0
+        usable_range_still_water = usable_battery / base_consumption if base_consumption > 0 else 0
+        
+        # Calculate realistic ranges with river flow effects
+        usable_range_downstream = (usable_battery / base_consumption) / 0.8 if base_consumption > 0 else 0
+        usable_range_upstream = (usable_battery / base_consumption) / 1.2 if base_consumption > 0 else 0
+        
         weight_ratio = (battery_weight_tonnes / vessel_gt) * 100 if vessel_gt > 0 else 0
         
         col1, col2, col3, col4 = st.columns(4)
@@ -1462,14 +1467,27 @@ def main() -> None:
             st.metric("**Total Capacity**", f"{battery_capacity/1000:.1f} MWh", 
                      help=f"{battery_capacity:,.0f} kWh")
         with col2:
-            st.metric("**Usable Range**", f"{usable_range:.0f} NM",
-                     help=f"{usable_battery:,.0f} kWh usable")
+            st.metric("**Range (Downstream)**", f"{usable_range_downstream:.0f} NM",
+                     help=f"⬇️ With flow (0.8× energy) | {usable_battery:,.0f} kWh usable",
+                     delta="Best case")
         with col3:
+            st.metric("**Range (Upstream)**", f"{usable_range_upstream:.0f} NM",
+                     help=f"⬆️ Against flow (1.2× energy) | {usable_battery:,.0f} kWh usable",
+                     delta="Worst case",
+                     delta_color="inverse")
+        with col4:
             st.metric("**Battery Weight**", f"{battery_weight_tonnes:.1f} t",
                      help=f"{weight_ratio:.1f}% of vessel GT")
-        with col4:
-            st.metric("**Max Range**", f"{max_range:.0f} NM",
-                     help="100% to 0% (theoretical)")
+        
+        # Range explanation
+        st.info(f"""
+        📊 **Range Analysis** ({usable_battery:,.0f} kWh usable @ {base_consumption:.0f} kWh/NM):
+        • **Downstream (⬇️)**: {usable_range_downstream:.0f} NM - traveling with river flow (0.8× energy)
+        • **Still Water**: {usable_range_still_water:.0f} NM - no current (1.0× energy)  
+        • **Upstream (⬆️)**: {usable_range_upstream:.0f} NM - against river flow (1.2× energy)
+        
+        ⚠️ **Important**: Your actual range per segment depends on river flow direction!
+        """)
         
         st.markdown("---")
         
