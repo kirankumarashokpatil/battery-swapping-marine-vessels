@@ -29,6 +29,10 @@ try:
 except ImportError:
     COLD_IRONING_AVAILABLE = False
 
+# Import new authentication system
+from auth_system import get_auth_system
+from auth_ui import show_login_page, show_user_profile, show_logout_button
+
 
 @st.cache_data
 def load_default_config() -> Dict:
@@ -84,7 +88,7 @@ def load_default_config() -> Dict:
             "energy_cost_per_kwh": 0.25,  # UK realistic: £0.16-£0.40/kWh (typical £0.25)
             "base_service_fee": 15.0,  # UK realistic: £8-£40 per container (typical £15)
             "swap_cost": 0.0,
-            "degradation_fee_per_kwh": 0.0,
+            "degradation_fee_per_kwh": 0.03,
         },
         "C": {
             "docking_time_hr": 3.0,  # If mandatory: 3 hours for major cargo/passenger ops
@@ -98,7 +102,7 @@ def load_default_config() -> Dict:
             "energy_cost_per_kwh": 0.30,  # UK realistic: higher at busy ports
             "base_service_fee": 20.0,  # UK realistic: £8-£40 per container
             "swap_cost": 0.0,
-            "degradation_fee_per_kwh": 0.0,
+            "degradation_fee_per_kwh": 0.03,
         },
         "D": {
             "docking_time_hr": 2.0,  # If mandatory: 2 hours
@@ -112,7 +116,7 @@ def load_default_config() -> Dict:
             "energy_cost_per_kwh": 0.22,  # UK realistic: £0.16-£0.40/kWh
             "base_service_fee": 18.0,  # UK realistic: £8-£40 per container
             "swap_cost": 0.0,
-            "degradation_fee_per_kwh": 0.0,
+            "degradation_fee_per_kwh": 0.03,
         },
         "E": {
             "docking_time_hr": 0.0,  # Pass-through only
@@ -166,7 +170,7 @@ def load_default_config() -> Dict:
                 "energy_cost_per_kwh": round(energy_rate, 3),
                 "base_service_fee": round(random.uniform(8.0, 40.0), 1),  # UK realistic: £8-£40 per container
                 "swap_cost": 0.0,
-                "degradation_fee_per_kwh": 0.0,
+                "degradation_fee_per_kwh": 0.03,
             }
     
     # T is always destination (no swap)
@@ -480,13 +484,10 @@ def form_frames_to_config(
                 record.get("Base Service Fee"), 
                 default_station_pricing.get("base_service_fee", 8.0)  # Default service fee
             ),
-            "swap_cost": _safe_float(
-                record.get("Swap Cost"), 
-                default_station_pricing.get("swap_cost", 0.0)  # Default swap cost
-            ),
+            "swap_cost": 0.0,  # No longer used - base_service_fee is now the per-container cost
             "degradation_fee_per_kwh": _safe_float(
-                record.get("Degradation Fee"), 
-                default_station_pricing.get("degradation_fee_per_kwh", 0.0)  # Default degradation
+                record.get("Battery Wear Fee"), 
+                default_station_pricing.get("degradation_fee_per_kwh", 0.03)  # Default degradation £0.03/kWh
             ),
             "base_charging_fee": _safe_float(
                 record.get("Charging Fee (£)"), 
@@ -608,10 +609,9 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                 energy_needed = battery_cap - soc_before_swap
                 
                 # Simplified hybrid pricing components
-                # Service fee = per-container handling + fixed operations fee (scales with containers)
+                # Service fee = per-container handling cost
                 base_service_fee = station_config.get('base_service_fee', 80.0)
-                per_container_fee = station_config.get('swap_cost', 0)
-                service_fee = (base_service_fee + per_container_fee) * num_containers
+                service_fee = base_service_fee * num_containers
                 
                 energy_charging = energy_needed * station_config.get('energy_cost_per_kwh', 0.09)
                 degradation_fee = station_config.get('degradation_fee_per_kwh', 0.0) * energy_needed
@@ -996,10 +996,9 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                     # Get number of containers swapped
                     num_containers = row.get('Containers', 10)
                     
-                    # Simplified service fee = scales with containers
+                    # Simplified service fee = cost per container
                     base_service_fee = station_config.get('base_service_fee', 80.0)
-                    per_container_fee = station_config.get('swap_cost', 0)
-                    service_fee = (base_service_fee + per_container_fee) * num_containers
+                    service_fee = base_service_fee * num_containers
                     
                     energy_cost_per_kwh = station_config.get('energy_cost_per_kwh', 0.09)
                     energy_charging = energy_needed * energy_cost_per_kwh
@@ -1240,6 +1239,7 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                 file_name="journey_plan.csv",
                 mime="text/csv",
                 width='stretch',
+                key="download_journey_csv",
                 help="Download detailed journey plan as CSV"
             )
         
@@ -1250,6 +1250,7 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                 file_name="scenario.json",
                 mime="application/json",
                 width='stretch',
+                key="download_scenario_json",
                 help="Save scenario configuration for later use"
             )
         
@@ -1272,18 +1273,63 @@ Maximum SoC: {max_soc:.1f} kWh
                 file_name="journey_summary.txt",
                 mime="text/plain",
                 width='stretch',
+                key="download_summary_txt",
                 help="Download summary report as text file"
             )
 
 
 def main() -> None:
     st.set_page_config(
-        page_title="Marine Vessels Battery Swapping", 
+        page_title="Marine Vessels Battery Swapping",
         layout="wide",
         page_icon="🚢",
         initial_sidebar_state="expanded"
     )
-    
+
+    # Initialize authentication system
+    auth_system = get_auth_system()
+
+    # Check session validity
+    session_token = st.session_state.get('session_token')
+    if session_token:
+        username = auth_system.validate_session(session_token)
+        if username:
+            st.session_state.authenticated = True
+            st.session_state.username = username
+        else:
+            # Session expired or invalid
+            st.session_state.authenticated = False
+            st.session_state.username = None
+            st.session_state.session_token = None
+
+    # Authentication check
+    if not st.session_state.get('authenticated', False):
+        show_login_page()
+        return
+
+    # Show user profile/logout in sidebar
+    with st.sidebar:
+        show_logout_button()
+
+        st.markdown("---")
+
+        # Add profile management
+        with st.expander("� Profile", expanded=False):
+            show_user_profile()
+
+        st.header("⚙️ Configuration")
+
+        st.markdown("---")
+
+        run_button = st.button(
+            "🚀 Run Optimisation",
+            type="primary",
+            use_container_width=True,
+            key="run_optimisation_button",
+            help="Click to compute the optimal battery swap strategy"
+        )
+
+    # Main app content (only shown when authenticated)
     st.title("🚢 Marine Vessels Battery Swapping Optimiser")
     st.markdown("---")
 
@@ -1293,9 +1339,6 @@ def main() -> None:
     # VESSEL CONFIGURATION
     # ========================================
     with st.expander("🚢 **VESSEL CONFIGURATION**", expanded=True):
-        
-        # SECTION 1: Vessel Type Selection (Most Important - Top)
-        st.markdown("### 1️⃣ Select Your Vessel")
         vessel_type_str = st.selectbox(
             "**Vessel Type**",
             options=[vt.value for vt in VesselType],
@@ -1541,18 +1584,6 @@ def main() -> None:
                 st.write(f"- Hotelling: {hotelling_power:,.0f} kW")
         
         # Reference Data (Hidden for simplified UI - removed)
-
-    with st.sidebar:
-        st.header("⚙️ Configuration")
-        
-        st.markdown("---")
-        
-        run_button = st.button(
-            "🚀 Run Optimisation", 
-            type="primary",
-            use_container_width=True,
-            help="Click to compute the optimal battery swap strategy"
-        )
 
     # Interactive Form (always shown)
     if True:
@@ -1839,6 +1870,29 @@ def main() -> None:
                             help="UK realistic: £10-£50 per charging session"
                         )
                         
+                        st.markdown("**💰 Swap Costs**")
+                        
+                        base_service_fee = st.number_input(
+                            "Base Service Fee (£)",
+                            min_value=0.0,
+                            max_value=200.0,
+                            value=default_station.get("base_service_fee", 15.0),  # UK realistic: £8-£40 per container
+                            step=5.0,
+                            key=f"base_service_fee_{name}",
+                            help="Cost per container swapped (includes handling and operations)"
+                        )
+                        
+                        degradation_fee_per_kwh = st.number_input(
+                            "Battery Wear Fee (£/kWh)",
+                            min_value=0.0,
+                            max_value=0.50,
+                            value=default_station.get("degradation_fee_per_kwh", 0.03),  # Default to 0.03 (£0.03/kWh wear cost)
+                            step=0.01,
+                            format="%.3f",
+                            key=f"degradation_fee_{name}",
+                            help="Battery degradation cost per kWh charged (default £0.03/kWh)"
+                        )
+                        
                         batteries = st.number_input(
                             "Battery Stock",
                             min_value=0,
@@ -1871,6 +1925,8 @@ def main() -> None:
                         "Docking Time (hr)": station_docking_time,
                         "Charging Power (kW)": station_charging_power,
                         "Charging Fee (£)": station_charging_fee,
+                        "Base Service Fee": base_service_fee,
+                        "Battery Wear Fee": degradation_fee_per_kwh,
                         "Open Hour": open_hour,
                         "Close Hour": close_hour,
                         "Available Batteries": batteries,

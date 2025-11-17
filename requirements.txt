@@ -1,4 +1,7 @@
 streamlit>=1.24.0,<2.0
 pandas>=1.5.0,<3.0
+bcrypt>=4.0.0,<5.0
+email-validator>=2.0.0,<3.0
+python-dotenv>=1.0.0,<2.0
 
 # Optional: pin a specific Python version when building the image (Dockerfile uses python:3.10-slim)
