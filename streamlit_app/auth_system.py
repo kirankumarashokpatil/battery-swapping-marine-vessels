@@ -113,9 +113,25 @@ class AuthSystem:
         return self._encrypt_data(data)
 
     def _get_default_user_data(self) -> Dict:
-        """Get default user data structure."""
+        """Get default user data structure with admin user."""
+        # Create default admin user
+        admin_user = {
+            "username": "admin",
+            "password_hash": self._hash_password("NatPower2025!"),
+            "email": "admin@natpower.co.uk",
+            "created_at": time.time(),
+            "last_login": None,
+            "is_active": True,
+            "is_approved": True,
+            "role": "admin",
+            "approved_by": "system",
+            "approved_at": time.time()
+        }
+
         return {
-            "users": {},
+            "users": {
+                "admin": admin_user
+            },
             "sessions": {},
             "login_attempts": {},
             "password_reset_tokens": {}
