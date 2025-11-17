@@ -13,7 +13,12 @@ from datetime import datetime
 import streamlit as st
 from typing import Callable, Optional
 
-from auth_system import get_auth_system
+try:
+    # Try relative import first (when run as package)
+    from .auth_system import get_auth_system
+except ImportError:
+    # Fall back to absolute import (when run directly)
+    from auth_system import get_auth_system
 
 
 def validate_email(email: str) -> bool:

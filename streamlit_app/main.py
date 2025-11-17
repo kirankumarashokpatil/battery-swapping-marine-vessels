@@ -30,8 +30,14 @@ except ImportError:
     COLD_IRONING_AVAILABLE = False
 
 # Import new authentication system
-from auth_system import get_auth_system
-from auth_ui import show_login_page, show_user_profile, show_logout_button
+try:
+    # Try relative imports first (for Streamlit app execution)
+    from .auth_system import get_auth_system
+    from .auth_ui import show_login_page, show_user_profile, show_logout_button
+except ImportError:
+    # Fall back to absolute imports (for direct execution/testing)
+    from auth_system import get_auth_system
+    from auth_ui import show_login_page, show_user_profile, show_logout_button
 
 
 @st.cache_data
@@ -240,7 +246,7 @@ def _safe_float(value: object, default: float = 0.0) -> float:
             return default
         if isinstance(value, str) and not value.strip():
             return default
-        return float(value)
+        return float(str(value))
     except (TypeError, ValueError):
         return default
 
@@ -264,7 +270,7 @@ def _safe_int(value: object) -> int | None:
     if isinstance(value, str) and not value.strip():
         return None
     try:
-        return int(float(value))
+        return int(float(str(value)))
     except (TypeError, ValueError):
         return None
 
@@ -425,7 +431,7 @@ def form_frames_to_config(
     segments_df: pd.DataFrame,
     stations_df: pd.DataFrame,  # <-- Receives the station data now
     params: Dict[str, float],
-    default_config: Dict = None,  # <-- Add default config to merge pricing
+    default_config: Dict | None = None,  # <-- Add default config to merge pricing
 ) -> Dict:
     stops = [stop.strip() for stop in route_text.split(",") if stop.strip()]
     if len(stops) < 2:
@@ -648,7 +654,7 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                 })
     
     # Total of all swap-related costs
-    total_all_swap_costs = (
+    total_all_swap_costs = float(
         total_swap_service_cost + 
         total_energy_charging_cost + 
         total_degradation +
@@ -656,7 +662,7 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
     )
     
     # Time cost and other non-swap costs
-    total_time_and_other_costs = totals['total_cost'] - total_all_swap_costs
+    total_time_and_other_costs = float(str(totals['total_cost'])) - total_all_swap_costs
     # --- END COST BREAKDOWN ---
 
     # Key Metrics Row
@@ -820,8 +826,8 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                     "Segment": st.column_config.TextColumn("Segment", width="medium"),
                     "Flow": st.column_config.TextColumn("Flow", width="small"),
                     "Operation": st.column_config.TextColumn("Operation", width="small"),
-                    "Swap": st.column_config.CheckboxColumn("Swap?", width="tiny"),
-                    "Charged": st.column_config.CheckboxColumn("Charged?", width="tiny"),
+                    "Swap": st.column_config.CheckboxColumn("Swap?", width="small"),
+                    "Charged": st.column_config.CheckboxColumn("Charged?", width="small"),
                     "Arrival (hr)": st.column_config.NumberColumn("Arrival", format="%.2f hr"),
                     "Departure (hr)": st.column_config.NumberColumn("Departure", format="%.2f hr"),
                     "Berth Time (hr)": st.column_config.NumberColumn("Berth Time", format="%.2f hr", help="Total time at berth including all operations"),

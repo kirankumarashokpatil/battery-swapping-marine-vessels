@@ -41,9 +41,9 @@ MIN_PASSWORD_LENGTH = 8
 # Email configuration
 SMTP_SERVER = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
 SMTP_PORT = int(os.getenv('SMTP_PORT', '587'))
-SMTP_USERNAME = os.getenv('SMTP_USERNAME')
-SMTP_PASSWORD = os.getenv('SMTP_PASSWORD')
-FROM_EMAIL = os.getenv('FROM_EMAIL', SMTP_USERNAME)
+SMTP_USERNAME = os.getenv('SMTP_USERNAME', '')
+SMTP_PASSWORD = os.getenv('SMTP_PASSWORD', '')
+FROM_EMAIL = os.getenv('FROM_EMAIL', SMTP_USERNAME or '')
 APP_URL = os.getenv('APP_URL', 'http://localhost:8501')
 
 def is_demo_mode() -> bool:
@@ -53,7 +53,7 @@ def is_demo_mode() -> bool:
 class AuthSystem:
     """Production-ready authentication system with security features."""
 
-    def __init__(self, data_dir: str = None):
+    def __init__(self, data_dir: Optional[str] = None):
         """Initialize the authentication system."""
         if data_dir is None:
             # Default to app directory
@@ -81,7 +81,7 @@ class AuthSystem:
                 # self.user_data = json.loads(self._decrypt_data(data))
                 self.user_data = json.loads(data)
             except Exception as e:
-                st.error(f"Error loading user data: {e}")
+                st.error(f"Error loading user data: {str(e)}")
                 self.user_data = self._get_default_user_data()
         else:
             self.user_data = self._get_default_user_data()
@@ -97,7 +97,7 @@ class AuthSystem:
             with open(self.user_data_file, 'w') as f:
                 f.write(data)
         except Exception as e:
-            st.error(f"Error saving user data: {e}")
+            st.error(f"Error saving user data: {str(e)}")
 
     def _encrypt_data(self, data: str) -> str:
         """Simple encryption for demo purposes. Use proper encryption in production."""
@@ -160,6 +160,11 @@ class AuthSystem:
 
     def _send_password_reset_email(self, email: str, username: str, reset_token: str) -> bool:
         """Send password reset email to user."""
+        # Check if email configuration is available
+        if not SMTP_USERNAME or not SMTP_PASSWORD:
+            print("Email configuration not available - skipping email send")
+            return False
+
         try:
             # Create message
             msg = MIMEMultipart()
@@ -205,6 +210,11 @@ class AuthSystem:
 
     def _send_admin_notification_email(self, admin_email: str, username: str, user_email: str) -> bool:
         """Send notification to admin about password reset request."""
+        # Check if email configuration is available
+        if not SMTP_USERNAME or not SMTP_PASSWORD:
+            print("Email configuration not available - skipping admin notification")
+            return False
+
         try:
             # Create message
             msg = MIMEMultipart()
@@ -242,6 +252,8 @@ class AuthSystem:
         except Exception as e:
             print(f"Failed to send admin notification email: {e}")
             return False
+
+    def _is_account_locked(self, username: str) -> bool:
         """Check if account is locked due to failed login attempts."""
         attempts = self.user_data["login_attempts"].get(username, {})
         if not attempts:
@@ -264,12 +276,6 @@ class AuthSystem:
             self._save_user_data()
 
         return False
-
-    def _is_account_locked(self, username: str) -> bool:
-        """Check if account is locked due to failed login attempts."""
-        attempts = self.user_data["login_attempts"].get(username, {})
-        lockout_until = attempts.get("lockout_until", 0)
-        return time.time() < lockout_until
 
     def _record_login_attempt(self, username: str, success: bool) -> None:
         """Record a login attempt."""
@@ -440,6 +446,9 @@ class AuthSystem:
             return True, f"Password reset token: {reset_token}"
         else:
             # In production mode, send email
+            if username is None:
+                return False, "Unable to identify user for password reset"
+
             email_sent = self._send_password_reset_email(user_email, username, reset_token)
 
             if email_sent:
