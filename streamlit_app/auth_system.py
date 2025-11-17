@@ -80,11 +80,17 @@ class AuthSystem:
                 # For now, disable encryption to avoid corruption
                 # self.user_data = json.loads(self._decrypt_data(data))
                 self.user_data = json.loads(data)
+
+                # Check if we need to create default admin user
+                if not self.user_data.get("users"):
+                    self._create_default_admin_user()
             except Exception as e:
                 st.error(f"Error loading user data: {str(e)}")
                 self.user_data = self._get_default_user_data()
+                self._create_default_admin_user()
         else:
             self.user_data = self._get_default_user_data()
+            self._create_default_admin_user()
             self._save_user_data()
 
     def _save_user_data(self) -> None:
@@ -113,29 +119,31 @@ class AuthSystem:
         return self._encrypt_data(data)
 
     def _get_default_user_data(self) -> Dict:
-        """Get default user data structure with admin user."""
-        # Create default admin user
-        admin_user = {
-            "username": "admin",
-            "password_hash": self._hash_password("NatPower2025!"),
-            "email": "admin@natpower.co.uk",
-            "created_at": time.time(),
-            "last_login": None,
-            "is_active": True,
-            "is_approved": True,
-            "role": "admin",
-            "approved_by": "system",
-            "approved_at": time.time()
-        }
-
+        """Get default user data structure."""
         return {
-            "users": {
-                "admin": admin_user
-            },
+            "users": {},
             "sessions": {},
             "login_attempts": {},
             "password_reset_tokens": {}
         }
+
+    def _create_default_admin_user(self) -> None:
+        """Create the default admin user if no users exist."""
+        if "admin" not in self.user_data["users"]:
+            admin_user = {
+                "username": "admin",
+                "password_hash": self._hash_password("NatPower2025!"),
+                "email": "admin@natpower.co.uk",
+                "created_at": time.time(),
+                "last_login": None,
+                "is_active": True,
+                "is_approved": True,
+                "role": "admin",
+                "approved_by": "system",
+                "approved_at": time.time()
+            }
+            self.user_data["users"]["admin"] = admin_user
+            self._save_user_data()
 
     def _hash_password(self, password: str) -> str:
         """Hash a password using bcrypt."""
