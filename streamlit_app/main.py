@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
 import pandas as pd
+import math
 import streamlit as st
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -40,53 +41,95 @@ except ImportError:
     from auth_ui import show_login_page, show_user_profile, show_logout_button
 
 
+def compute_segment_energy(
+    distance_nm: float,
+    current_knots: float,
+    mode: str = "laden",
+    base_consumption_laden: float = 245.0,
+    base_consumption_unladen: float = 207.0,
+    boat_speed_laden: float = 5.0,
+    boat_speed_unladen: float = 6.0
+) -> Tuple[float, float]:
+    """
+    Unified energy + travel time calculation. Used by optimizer AND all diagnostics.
+    Returns (energy_kwh, travel_time_hr)
+    """
+    m = (mode or "laden").lower()
+    
+    # Select mode parameters
+    if m == "unladen":
+        base_per_nm = base_consumption_unladen
+        boat_speed_knots = boat_speed_unladen
+    else:  # laden or default
+        base_per_nm = base_consumption_laden
+        boat_speed_knots = boat_speed_laden
+    
+    # Travel time (ground speed)
+    ground_speed = boat_speed_knots + current_knots
+    if ground_speed <= 0:
+        raise ValueError(f"Ground speed non-positive: speed={boat_speed_knots}, current={current_knots}")
+    
+    travel_time_hr = distance_nm / ground_speed
+    
+    # Energy consumption (corrected zero-flow logic)
+    base_energy = distance_nm * base_per_nm
+    if current_knots == 0:
+        multiplier = 1.0
+    elif current_knots < 0:  # Upstream (head current)
+        multiplier = 1.2
+    else:  # Downstream (tailwind)
+        multiplier = 0.8
+    
+    energy_kwh = base_energy * multiplier
+    
+    # DEBUG LOGGING
+    print(f"DEBUG_CALC: {mode} | dist={distance_nm} | current={current_knots} | speed={boat_speed_knots} | cons={base_per_nm} | mul={multiplier} | energy={energy_kwh}")
+
+    
+    return energy_kwh, travel_time_hr
+
+
 @st.cache_data
 def load_default_config() -> Dict:
     import random
     
-    # Generate randomized distances (25-55 NM range)
-    distances = {}
-    route_segments = ["A-B", "B-C", "C-D", "D-E", "E-F", "F-G", "G-H", "H-I", "I-J", "J-K", "K-L", "L-M", "M-N", "N-O", "O-P", "P-Q", "Q-R", "R-S", "S-T"]
+    # Default route uses real port names (Zhao Qing ⇄ Guangzhou Nansha ⇄ HK Tsing Yi C)
+    distances = {
+        "Zhao Qing-Guangzhou Nansha": 114.0,
+        "Guangzhou Nansha-HK Tsing Yi C": 40.0,
+        "HK Tsing Yi C-Guangzhou Nansha": 40.0,
+        "Guangzhou Nansha-Zhao Qing": 114.0,
+    }
     
-    # Keep first few segments as provided in your data
-    distances.update({
-        "A-B": 40.0,
-        "B-C": 35.0,
-        "C-D": 45.0,
-        "D-E": 30.0,
-    })
     
-    # Randomize remaining segments
-    for segment in route_segments[4:]:  # Skip first 4
-        distances[segment] = round(random.uniform(25.0, 55.0), 1)
-    
-    # Generate randomized currents (-3.0 to +3.5 knots range)
-    currents = {}
+    # Currents for our route - default to zero for other legs and set these legs per request
+    currents = {key: 0.0 for key in distances.keys()}
     currents.update({
-        "A-B": -2.5,  # Upstream (against flow)
-        "B-C": -1.8,  # Upstream (against flow)
-        "C-D": 3.2,   # Downstream (with flow)
-        "D-E": 2.0,   # Downstream (with flow)
+        "Zhao Qing-Guangzhou Nansha": 0,
+        "Guangzhou Nansha-HK Tsing Yi C": 0,
+        "HK Tsing Yi C-Guangzhou Nansha": 0,
+        "Guangzhou Nansha-Zhao Qing": 0,
     })
     
-    # Randomize remaining currents
-    for segment in route_segments[4:]:  # Skip first 4
-        currents[segment] = round(random.uniform(-3.0, 3.5), 1)
+    # No remaining segments/currents to randomize for this compact default scenario
     
     # Generate randomized station configs
     stations = {
-        "A": {
+        "Zhao Qing": {
             "docking_time_hr": 0.0,  # Origin - no stop
             "swap_operation_time_hr": 0.5,
             "allow_swap": False,
             "charging_allowed": False,
             "charging_power_kw": 0.0,
+            "available_batteries": 17,
+            "total_batteries": 17,
         },
-        "B": {
+        "Guangzhou Nansha": {
             "docking_time_hr": 2.0,  # If mandatory stop: 2 hours for passenger ops
             "swap_operation_time_hr": 0.5,  # Battery swap: 30 minutes
             "operating_hours": [6.0, 22.0],
-            "available_batteries": 5,
+            "available_batteries": 17,
+            "total_batteries": 17,
             "allow_swap": True,
             "charging_allowed": True,
             "charging_power_kw": 250.0,
@@ -95,12 +138,15 @@ def load_default_config() -> Dict:
             "base_service_fee": 15.0,  # UK realistic: £8-£40 per container (typical £15)
             "swap_cost": 0.0,
             "degradation_fee_per_kwh": 0.03,
+            "background_charging_power_kw": 2000.0,
+            "background_charging_allowed": True,
         },
-        "C": {
-            "docking_time_hr": 3.0,  # If mandatory: 3 hours for major cargo/passenger ops
+        "HK Tsing Yi C": {
+            "docking_time_hr": 4.0,  # If mandatory: 4 hours for unloading (per reference image)
             "swap_operation_time_hr": 0.75,  # Battery swap: 45 minutes
             "operating_hours": [0.0, 24.0],
-            "available_batteries": 4,
+            "available_batteries": 17,
+            "total_batteries": 17,
             "allow_swap": True,
             "charging_allowed": True,
             "charging_power_kw": 500.0,
@@ -109,12 +155,15 @@ def load_default_config() -> Dict:
             "base_service_fee": 20.0,  # UK realistic: £8-£40 per container
             "swap_cost": 0.0,
             "degradation_fee_per_kwh": 0.03,
+            "background_charging_power_kw": 500.0,
+            "background_charging_allowed": True,
         },
         "D": {
             "docking_time_hr": 2.0,  # If mandatory: 2 hours
             "swap_operation_time_hr": 0.5,  # Battery swap: 30 minutes
             "operating_hours": [8.0, 20.0],
-            "available_batteries": 12,
+            "available_batteries": 17,
+            "total_batteries": 17,
             "allow_swap": True,
             "charging_allowed": True,
             "charging_power_kw": 350.0,
@@ -133,7 +182,7 @@ def load_default_config() -> Dict:
         },
     }
     
-    # Generate random station configs for F-S (T is destination)
+    # We don't need many stations for this default; any others remain as placeholders
     station_names = ["F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S"]
     for station in station_names:
         if station in ["K", "P"]:  # Make some stations non-swap for variety
@@ -146,7 +195,8 @@ def load_default_config() -> Dict:
         else:
             # Some stations are 24/7, others have limited hours
             is_24_7 = random.random() > 0.75
-            batteries_available = random.randint(3, 12)
+            # Default to 17 batteries for each station in the simplified default scenario
+            batteries_available = 17
             
             # Energy pricing logic:
             # - 24/7 stations charge premium (15-20% higher)
@@ -169,6 +219,7 @@ def load_default_config() -> Dict:
                 "swap_operation_time_hr": round(random.uniform(0.25, 1.0), 2),  # Battery swap: 15 min - 1 hour
                 "operating_hours": [0.0, 24.0] if is_24_7 else [random.randint(5, 9), random.randint(16, 23)],
                 "available_batteries": batteries_available,
+                "total_batteries": batteries_available,
                 "allow_swap": True,
                 "charging_allowed": charging_power > 0,
                 "charging_power_kw": charging_power,
@@ -187,57 +238,69 @@ def load_default_config() -> Dict:
         "charging_power_kw": 0.0,
     }
     
+    # Default battery: based on container count (12 containers × container size) as default UX
+    min_soc_fraction = 0.2
+    default_num_containers = 12
+    container_capacity_kwh = 2460.0
+    battery_capacity_kwh = round(container_capacity_kwh * default_num_containers, 1)
+    # Default initial SoC: start full (100%); so initial_soc - min_soc = usable_expected_kwh
+    initial_soc_fraction = 1.0
+    initial_soc_kwh = round(battery_capacity_kwh * initial_soc_fraction, 1)
+
     return {
-        "route": ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T"],
+        "route": ["Zhao Qing", "Guangzhou Nansha", "HK Tsing Yi C", "Guangzhou Nansha", "Zhao Qing"],
         "distances_nm": distances,
         "currents_knots": currents,
-        "boat_speed_knots": 5.0,  # 5 knots - typical for cargo vessels
-        "base_consumption_per_nm": 220.0,  # Based on actual data: 207-245 kWh/NM for laden cargo vessels
-        "battery_capacity_kwh": 19600.0,  # 10 containers × 1960 kWh = 19.6 MWh total
-        "battery_container_capacity_kwh": 1960.0,  # Standard 20-foot ISO container capacity
-        "initial_soc_kwh": 19600.0,  # Start with full battery (100%)
-        "minimum_soc_fraction": 0.2,  # Industry standard 20% reserve
+        # Default vessel behavior derived from the reference table:
+        "boat_speed_laden": 5.0,
+        "boat_speed_unladen": 6.0,
+        "base_consumption_laden": 245.0,
+        "base_consumption_unladen": 207.0,
+        # Default battery settings:
+        "battery_capacity_kwh": battery_capacity_kwh,  # Default based on container count (container_capacity_kwh × num_containers)
+        "battery_container_capacity_kwh": 2460.0,  # Standard 20-foot ISO container capacity
+        "initial_soc_kwh": initial_soc_kwh,  # Start with full battery (100%)
+        "minimum_soc_fraction": min_soc_fraction,  # Industry standard 20% reserve
+        "vessel_charging_power_kw": 1000.0,  # Default acceptance capacity for vessel charging
         "energy_cost_per_kwh": 0.12,
         "time_cost_per_hr": 25.0,
-        "soc_step_kwh": 20.0,  # Adjusted for containerized battery capacity (1960 kWh)
+        "soc_step_kwh": 20.0,  # Adjusted for containerized battery capacity (2460 kWh)
         "start_time_hr": 6.0,
         "stations": stations,
+        "num_containers": default_num_containers,
     }
 
-
-def calculate_energy_consumption(
-    distance_nm: float,
-    current_knots: float,
-    boat_speed_knots: float,
-    base_consumption_per_nm: float,
-) -> float:
-    base_energy = distance_nm * base_consumption_per_nm
-    multiplier = 1.2 if current_knots < 0 else 0.8
-    return base_energy * multiplier
 
 
 def build_segment_option(
     segment_name: str,
     distance_nm: float,
     current_knots: float,
-    boat_speed_knots: float,
-    base_consumption_per_nm: float,
+    mode: str = "laden",
+    boat_speed: float = 5.0,
+    boat_speed_laden: float = 5.0,
+    boat_speed_unladen: float = 6.0,
+    base_consumption: float = 245.0,
+    base_consumption_laden: float = 245.0,
+    base_consumption_unladen: float = 207.0,
 ) -> SegmentOption:
-    ground_speed = boat_speed_knots + current_knots
-    if ground_speed <= 0:
-        raise ValueError(f"Ground speed becomes non-positive for segment {segment_name}.")
-    travel_time_hr = distance_nm / ground_speed
-    energy_kwh = calculate_energy_consumption(
-        distance_nm,
-        current_knots,
-        boat_speed_knots,
-        base_consumption_per_nm,
+    # Delegate to unified computation
+    energy_kwh, travel_time_hr = compute_segment_energy(
+        distance_nm=distance_nm,
+        current_knots=current_knots,
+        mode=mode,
+        base_consumption_laden=base_consumption_laden,
+        base_consumption_unladen=base_consumption_unladen,
+        boat_speed_laden=boat_speed_laden,
+        boat_speed_unladen=boat_speed_unladen
     )
+    
     return SegmentOption(
         label=segment_name,
         travel_time_hr=travel_time_hr,
         energy_kwh=energy_kwh,
     )
+
 
 
 def _safe_float(value: object, default: float = 0.0) -> float:
@@ -286,27 +349,48 @@ def _pairwise(iterable: Iterable[str]) -> Iterable[Tuple[str, str]]:
 
 
 def build_inputs(config: Dict) -> FixedPathInputs:
-    route = config["route"]
+    # Respect per-vessel route if present (vessel_route is per-vessel override)
+    route = config.get("vessel_route", config["route"]) if isinstance(config.get("vessel_route"), list) else config["route"]
     distances = config["distances_nm"]
     currents = config["currents_knots"]
-    boat_speed = float(config["boat_speed_knots"])
-    base_consumption = float(config["base_consumption_per_nm"])
+    # Derive per-mode speeds & consumption; keep a derived general 'boat_speed_knots' for compatibility
+    boat_speed_unladen = float(config.get("boat_speed_unladen", 0.0))
+    boat_speed_laden = float(config.get("boat_speed_laden", boat_speed_unladen))
+    # Derived 'boat_speed_knots' is conservatively set to unladen speed (used where a single speed may be expected)
+    boat_speed_knots = boat_speed_unladen
+    base_consumption_laden = float(config.get("base_consumption_laden", 0.0))
+    base_consumption_unladen = float(config.get("base_consumption_unladen", base_consumption_laden))
 
     segments: List[Segment] = []
+    # Build mapping for per-vessel segments attributes (laden/must_stop)
+    vessel_segment_flags = { (str(s.get("start")).strip(), str(s.get("end")).strip()): s for s in config.get("vessel_segments", []) }
     for start, end in _pairwise(route):
         key = f"{start}-{end}"
         if key not in distances or key not in currents:
             raise ValueError(f"Missing data for segment {key}")
+        seg_flags = vessel_segment_flags.get((start, end), {})
+        # Convert underlying segment mode to 'laden'/'unladen'; default to 'unladen' for initial runs
+        mode = str(seg_flags.get("mode", "unladen")).lower()
         option = build_segment_option(
             segment_name=f"{start}->{end}",
             distance_nm=float(distances[key]),
             current_knots=float(currents[key]),
-            boat_speed_knots=boat_speed,
-            base_consumption_per_nm=base_consumption,
+            mode=mode,
+            boat_speed=boat_speed_laden,
+            boat_speed_laden=boat_speed_laden,
+            boat_speed_unladen=boat_speed_unladen,
+            base_consumption=base_consumption_laden,
+            base_consumption_laden=base_consumption_laden,
+            base_consumption_unladen=base_consumption_unladen,
         )
         segments.append(Segment(start=start, end=end, options=[option]))
 
     stations: List[Station] = []
+    # Build set of arrival stations that should be mandatory stops for this vessel
+    arrival_mandatory_stops = {s.get("end") for s in config.get("vessel_segments", []) if s.get("must_stop")}
+    # Build mapping of arrival docking times per station for this vessel
+    arrival_docking_times = {s.get("end"): float(s.get("docking_time_hr")) for s in config.get("vessel_segments", []) if s.get("docking_time_hr") is not None}
+    arrival_force_swaps = {s.get("end"): bool(s.get("force_swap")) for s in config.get("vessel_segments", []) if s.get("force_swap") is not None}
     for name in route:
         station_cfg = config.get("stations", {}).get(name, {})
         operating = station_cfg.get("operating_hours")
@@ -316,22 +400,34 @@ def build_inputs(config: Dict) -> FixedPathInputs:
                 raise ValueError(f"Station {name} operating_hours must have two values")
             operating_tuple = (float(operating[0]), float(operating[1]))
         
+        # Determine docking time for this station for this vessel run
+        _docking_override = arrival_docking_times.get(name)
+        if _docking_override is None:
+            _docking_override = station_cfg.get("docking_time_hr")
+        if _docking_override is None:
+            _docking_override = 0.0
+        dock_time_val = float(_docking_override)
         stations.append(
             Station(
                 name=name,
-                docking_time_hr=float(station_cfg.get("docking_time_hr", 2.0)),
+                docking_time_hr=dock_time_val,
                 swap_operation_time_hr=float(station_cfg.get("swap_operation_time_hr", 0.5)),
-                mandatory_stop=_safe_bool(station_cfg.get("mandatory_stop", False), default=False),
+                # Station-level mandatory stop removed from UI; set based on per-vessel arrival flags
+                mandatory_stop=(name in arrival_mandatory_stops),
                 operating_hours=operating_tuple,
                 available_batteries=_safe_int(station_cfg.get("available_batteries")),
+                total_batteries=_safe_int(station_cfg.get("total_batteries")),
                 allow_swap=_safe_bool(station_cfg.get("allow_swap", True), default=True),
-                force_swap=_safe_bool(station_cfg.get("force_swap", False), default=False),
+                # Station force swap is also per-vessel schedule-driven
+                force_swap=(bool(arrival_force_swaps.get(name)) if name in arrival_force_swaps else bool(station_cfg.get("force_swap", False))),
                 partial_swap_allowed=_safe_bool(station_cfg.get("partial_swap_allowed", False), default=False),
                 energy_cost_per_kwh=float(station_cfg.get("energy_cost_per_kwh", 0.25)),  # UK realistic: £0.16-£0.40/kWh
                 # Charging infrastructure
                 charging_power_kw=float(station_cfg.get("charging_power_kw", 0.0)),
                 charging_efficiency=float(station_cfg.get("charging_efficiency", 0.95)),
                 charging_allowed=_safe_bool(station_cfg.get("charging_allowed", False), default=False),
+                background_charging_power_kw=float(station_cfg.get("background_charging_power_kw", 0.0)),
+                background_charging_allowed=_safe_bool(station_cfg.get("background_charging_allowed", False), default=False),
                 # Simplified pricing components
                 swap_cost=float(station_cfg.get("swap_cost", 0.0)),
                 base_service_fee=float(station_cfg.get("base_service_fee", 8.0)),
@@ -341,7 +437,7 @@ def build_inputs(config: Dict) -> FixedPathInputs:
         )
 
     battery_capacity = float(config["battery_capacity_kwh"])
-    battery_container_capacity = float(config.get("battery_container_capacity_kwh", 1960.0))  # Default to standard container
+    battery_container_capacity = float(config.get("battery_container_capacity_kwh", 2460.0))  # Default to standard container
     initial_soc = float(config.get("initial_soc_kwh", battery_capacity))
     min_soc_fraction = float(config.get("minimum_soc_fraction", 0.0))
     min_soc = battery_capacity * min_soc_fraction
@@ -377,6 +473,7 @@ def build_inputs(config: Dict) -> FixedPathInputs:
         soc_step_kwh=float(config["soc_step_kwh"]),
         start_time_hr=float(config["start_time_hr"]),
         vessel_specs=vessel_specs,
+        vessel_charging_power_kw=float(config.get("vessel_charging_power_kw", 1e9)),
     )
 
 
@@ -410,19 +507,25 @@ def config_to_form_frames(config: Dict) -> Tuple[pd.DataFrame, pd.DataFrame]:
             {
                 "Station": name,
                 "Allow Swap": station_cfg.get("allow_swap", True),
-                "Force Swap": station_cfg.get("force_swap", False),
                 "Swap Cost": station_cfg.get("swap_cost", 0.0),
                 "Swap Time (hr)": station_cfg.get("swap_time_hr", 0.0),
                 "Queue Time (hr)": station_cfg.get("queue_time_hr", 0.0),
                 "Open Hour": operating[0] if operating else 0.0,
                 "Close Hour": operating[1] if operating else 24.0,
-                "Available Batteries": station_cfg.get("available_batteries", pd.NA),
+                "Charged Batteries": station_cfg.get("available_batteries", pd.NA),
+                "Total Batteries": station_cfg.get("total_batteries", station_cfg.get("available_batteries", pd.NA)),
                 "Energy Cost (£/kWh)": station_cfg.get("energy_cost_per_kwh", 0.25),  # UK realistic
+                "Background Charge (kW)": station_cfg.get("background_charging_power_kw", 0.0),
+                "Background Charging": station_cfg.get("background_charging_allowed", False),
             }
         )
     stations_df = pd.DataFrame(station_rows)
     if not stations_df.empty:
-        stations_df["Available Batteries"] = stations_df["Available Batteries"].astype("Int64")
+        # Normalize and cast battery columns
+        if "Charged Batteries" in stations_df.columns:
+            stations_df["Charged Batteries"] = stations_df["Charged Batteries"].astype("Int64")
+        if "Total Batteries" in stations_df.columns:
+            stations_df["Total Batteries"] = stations_df["Total Batteries"].astype("Int64")
     return segments_df, stations_df
 
 
@@ -432,8 +535,23 @@ def form_frames_to_config(
     stations_df: pd.DataFrame,  # <-- Receives the station data now
     params: Dict[str, float],
     default_config: Dict | None = None,  # <-- Add default config to merge pricing
+    vessel_segments_df: pd.DataFrame | None = None,
+    vessel_route_text: str | None = None,
 ) -> Dict:
-    stops = [stop.strip() for stop in route_text.split(",") if stop.strip()]
+    # route_text is the vessel route (subset of global stations) if provided;
+    # fall back to the global route if not provided
+    if not route_text or not str(route_text).strip():
+        # if vessel_route_text provided, use that as route
+        if vessel_route_text:
+            route_text = vessel_route_text
+        else:
+            raise ValueError("Route must contain at least two stops")
+    stops = [stop.strip() for stop in str(route_text).split(",") if stop.strip()]
+    # Validate vessel route stops against the station list provided by stations_df
+    valid_stations = set(stations_df["Station"].astype(str).tolist()) if not stations_df.empty else set()
+    invalid_stations = [s for s in stops if s not in valid_stations]
+    if invalid_stations:
+        raise ValueError(f"Vessel route contains stations not present in station configuration: {invalid_stations}")
     if len(stops) < 2:
         raise ValueError("Route must contain at least two stops")
 
@@ -473,12 +591,19 @@ def form_frames_to_config(
         close_hour = _safe_float(record.get("Close Hour"), 24.0)
             
         cfg: Dict[str, object] = {
-            "mandatory_stop": _safe_bool(record.get("Mandatory Stop"), default=False),
+            # Station-level mandatory/force swap removed from UI; use per-vessel segment flags instead (vessel_segments)
             "allow_swap": _safe_bool(record.get("Allow Swap"), default=True),
-            "force_swap": _safe_bool(record.get("Force Swap"), default=False),
             "partial_swap_allowed": _safe_bool(record.get("Partial Swap"), default=False),
             "charging_allowed": _safe_bool(record.get("Charging Allowed"), default=False),
-            "docking_time_hr": _safe_float(record.get("Docking Time (hr)"), 2.0),
+            # We'll determine background charging power with multiple fallbacks
+            # Primary source: the explicit Background Charge value from the UI
+            # Secondary: defaults from default_config (if available)
+            # Tertiary: station's regular charging power
+            # Final sensible default: 500kW if charging is allowed, otherwise 0.0
+            # Note: we initialize a placeholder here and then compute the real value below
+            "background_charging_allowed": False,
+            "background_charging_power_kw": 0.0,
+            "docking_time_hr": _safe_float(record.get("Docking Time (hr)"), 0.0),
             "swap_operation_time_hr": _safe_float(record.get("Swap Operation Time (hr)"), 0.5),
             "charging_power_kw": _safe_float(record.get("Charging Power (kW)"), 0.0),
             "operating_hours": [open_hour, close_hour],
@@ -501,7 +626,7 @@ def form_frames_to_config(
             ),
         }
         
-        available = record.get("Available Batteries")
+        available = record.get("Charged Batteries")
         # Handle the 999 placeholder for 'unlimited'
         if available == 999:
              cfg["available_batteries"] = None
@@ -509,6 +634,57 @@ def form_frames_to_config(
             available_int = _safe_int(available)
             if available_int is not None:
                 cfg["available_batteries"] = available_int
+        # Read total battery stock if provided
+        total_stock = None
+        total_val = record.get("Total Batteries")
+        if total_val is not None:
+            total_int = _safe_int(total_val)
+            if total_int is not None:
+                total_stock = total_int
+        # If not provided, default to current charged/available value
+        if total_stock is None:
+            total_stock = cfg.get("available_batteries")
+        cfg["total_batteries"] = total_stock
+        # CRITICAL FIX: Properly read background charging power with intelligent fallbacks
+        bg_power_from_ui = record.get("Background Charge (kW)", None)
+
+        # Try to get a valid value through multiple sources
+        if bg_power_from_ui is not None and str(bg_power_from_ui).strip() != "":
+            bg_power = _safe_float(bg_power_from_ui, 0.0)
+            if bg_power <= 0:
+                bg_power = None
+        else:
+            bg_power = None
+
+        # First fallback: check default_station_pricing (from prior loaded config)
+        if bg_power is None or bg_power <= 0:
+            bg_power = default_station_pricing.get("background_charging_power_kw", None)
+
+        # Second fallback: use the station's regular charging power (they should match)
+        if bg_power is None or bg_power <= 0:
+            charging_power_val = _safe_float(record.get("Charging Power (kW)"), 0.0)
+            if charging_power_val is not None and charging_power_val > 0:
+                bg_power = charging_power_val
+
+        # Third fallback: sensible default based on charging availability
+        if bg_power is None or bg_power <= 0:
+            if _safe_bool(record.get("Charging Allowed"), default=False):
+                bg_power = 500.0  # Default background charging if charging is allowed
+            else:
+                bg_power = 0.0
+
+        # FINAL: Store the value and ensure it's a valid float
+        cfg["background_charging_power_kw"] = float(bg_power) if bg_power else 0.0
+        cfg["background_charging_allowed"] = _safe_bool(
+            record.get("Background Charging"), 
+            default=(float(bg_power) > 0 if bg_power else False)
+        )
+
+        # ALSO ensure total_grid_power supports the charging capacity
+        cfg["total_grid_power_kw"] = max(
+            float(bg_power) if bg_power else 0.0,
+            _safe_float(cfg.get("total_grid_power_kw", 0.0), 0.0)
+        )
                 
         station_cfg[name] = cfg
 
@@ -519,10 +695,10 @@ def form_frames_to_config(
         "route": stops,
         "distances_nm": distances,
         "currents_knots": currents,
-        "boat_speed_knots": params["boat_speed"],
-        "base_consumption_per_nm": params["base_consumption"],
+        # Legacy 'boat_speed_knots' and 'base_consumption_per_nm' removed from scenario export.
+        # Use per-mode fields: 'boat_speed_laden', 'boat_speed_unladen', 'base_consumption_laden', 'base_consumption_unladen'
         "battery_capacity_kwh": params["battery_capacity"],
-        "battery_container_capacity_kwh": params.get("battery_container_capacity", 1960.0),
+        "battery_container_capacity_kwh": params.get("battery_container_capacity", 2460.0),
         "initial_soc_kwh": params.get("initial_soc_kwh", params["battery_capacity"]),
         "minimum_soc_fraction": params["minimum_soc"],
         "energy_cost_per_kwh": 0.09,  # Default fallback (actual costs are per-station)
@@ -531,6 +707,18 @@ def form_frames_to_config(
         "stations": station_cfg,
         "vessel_type": params.get("vessel_type", "Cargo/Container"),
         "vessel_gt": params.get("vessel_gt", 2000),
+        # Per-vessel speeds/consumption (laden/unladen)
+        "boat_speed_laden": params.get("boat_speed_laden", params.get("boat_speed")),
+        "boat_speed_unladen": params.get("boat_speed_unladen", params.get("boat_speed")),
+        "base_consumption_laden": params.get("base_consumption_laden", params.get("base_consumption")),
+        "base_consumption_unladen": params.get("base_consumption_unladen", params.get("base_consumption")),
+        # Add per-vessel segment flags if present
+        "vessel_route": [s for s in stops],
+                "vessel_segments": [] if vessel_segments_df is None else [
+                    {"start": str(r.get("From")), "end": str(r.get("To (Arrival)")), "mode": ("laden" if bool(r.get("Laden", True)) else "unladen"), "must_stop": bool(r.get("Must Stop", False)), "force_swap": bool(r.get("Force Swap", False)), "docking_time_hr": _safe_float(r.get("Docking (hr)"), default=0.0)}
+                    for r in vessel_segments_df.to_dict(orient="records")
+                ],
+                "vessel_charging_power_kw": params.get("vessel_charging_power", 1000.0),
     }
     return config
 
@@ -542,7 +730,11 @@ def run_optimizer(config: Dict) -> Tuple[pd.DataFrame, Dict[str, object]]:
 
     steps_rows: List[Dict[str, object]] = []
     soc_profile: List[Tuple[str, float]] = []
+    # Build vessel segment flag map for display
+    vessel_segment_map = { (str(s.get("start")).strip(), str(s.get("end")).strip()): s for s in config.get("vessel_segments", []) }
     for step in result.steps:
+        raw_parts = tuple(part.strip() for part in step.segment_label.split('->')) if step.segment_label else None
+        start_end_tuple = (raw_parts[0], raw_parts[1]) if raw_parts is not None and len(raw_parts) == 2 else None
         # Get flow direction for this segment
         segment_key = step.segment_label.replace('->', '-')
         current = config.get('currents_knots', {}).get(segment_key, 0)
@@ -561,14 +753,25 @@ def run_optimizer(config: Dict) -> Tuple[pd.DataFrame, Dict[str, object]]:
                 "Arrival (hr)": step.arrival_time_hr,
                 "Departure (hr)": step.departure_time_hr,
                 "Berth Time (hr)": step.station_docking_time_hr,  # Total time at berth (includes all operations)
+                "Scheduled Docking (hr)": vessel_segment_map.get(start_end_tuple, {}).get('docking_time_hr', step.station_docking_time_hr) if start_end_tuple else step.station_docking_time_hr,
                 "Travel (hr)": step.travel_time_hr,
                 "SoC Before (kWh)": step.soc_before_kwh,
                 "SoC After Operation (kWh)": step.soc_after_operation_kwh,
                 "SoC After Segment (kWh)": step.soc_after_segment_kwh,
+                "Charged Before (BC)": getattr(step, "station_charged_before", None),
+                "Charged After (BC)": getattr(step, "station_charged_after", None),
+                "Total Before (BC)": getattr(step, "station_total_before", None),
+                "Total After (BC)": getattr(step, "station_total_after", None),
+                "Precharged (BC)": getattr(step, "containers_precharged", 0),
+                "Charged During Stop (BC)": getattr(step, "containers_charged_during_stop", 0),
                 "Incremental Cost": step.incremental_cost,
                 "Cumulative Cost": step.cumulative_cost,
                 "Hotelling Energy (kWh)": step.hotelling_energy_kwh,
                 "Hotelling Power (kW)": step.hotelling_power_kw,
+                # Add per-segment flags for display
+                "Laden": (vessel_segment_map.get(start_end_tuple, {}).get('mode', 'laden').lower() == 'laden') if start_end_tuple else True,
+                "Must Stop (Arrival)": vessel_segment_map.get(start_end_tuple, {}).get('must_stop', False) if start_end_tuple else False,
+                "Force Swap (Arrival)": vessel_segment_map.get(start_end_tuple, {}).get('force_swap', False) if start_end_tuple else False,
             }
         )
         soc_profile.append((step.station_name, step.soc_before_kwh))
@@ -592,13 +795,26 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
     st.success("✅ Optimisation Complete!")
     st.markdown("---")
 
+    # Helper to safely coerce dataframe cell values to float (handles None / pd.NA)
+    def _safe_float_from_row(r, key, fallback=0.0):
+        v = r.get(key, fallback)
+        try:
+            if pd.isna(v):
+                return float(fallback)
+            return float(v)
+        except Exception:
+            try:
+                return float(str(v))
+            except Exception:
+                return float(fallback)
+
     # --- CALCULATE TRUE COST BREAKDOWN ONCE ---
     # This matches the optimizer's actual hybrid pricing model
     total_swap_service_cost = 0.0
     total_energy_charging_cost = 0.0
     total_degradation = 0.0
     total_hotelling_cost = 0.0
-    battery_cap = config.get('battery_capacity_kwh', 1960.0)
+    battery_cap = config.get('battery_capacity_kwh', 2460.0)
     
     swap_cost_details = []  # Store individual swap costs for table
     
@@ -607,12 +823,14 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
             if row['Swap']:
                 station_name = row['Station']
                 station_config = config.get('stations', {}).get(station_name, {})
-                soc_before_swap = row['SoC Before (kWh)']
+                soc_before_swap = _safe_float_from_row(row, 'SoC Before (kWh)')
                 num_containers = row.get('Containers', 1)
                 arrival_time = row['Arrival (hr)']
                 
-                # Calculate ACTUAL energy charged (SoC-based billing)
-                energy_needed = battery_cap - soc_before_swap
+                # Use ACTUAL ΔSoC from optimizer steps, not assumed full charge
+                actual_energy_charged = _safe_float_from_row(row, 'SoC After Operation (kWh)') - _safe_float_from_row(row, 'SoC Before (kWh)')
+                # For swaps, we charge the difference unless specified otherwise
+                energy_needed = actual_energy_charged
                 
                 # Simplified hybrid pricing components
                 # Service fee = per-container handling cost
@@ -648,9 +866,13 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                     'hotelling_cost': hotelling_cost,
                     'total_cost': total_cost_this_swap,
                     'energy_rate': station_config.get('energy_cost_per_kwh', 0.09),
+                    'total_batteries': station_config.get('total_batteries'),
                     'swap_time': station_config.get('swap_time_hr', 0),
                     'partial_swap_allowed': station_config.get('partial_swap_allowed', False),
                     'berth_time': row.get('Berth Time (hr)', 0),
+                    'charged_before': row.get('Charged Before (BC)'),
+                    'charged_after': row.get('Charged After (BC)'),
+                    'precharged': row.get('Precharged (BC)'),
                 })
     
     # Total of all swap-related costs
@@ -709,6 +931,12 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
             f"{swaps_count}S / {charges_count}C",
             help=f"Swaps: {swaps_count}, Charges: {charges_count}"
         )
+    # Show Start SoC and Min SoC for clarity
+    battery_cap = config.get('battery_capacity_kwh', 0)
+    start_soc = config.get('initial_soc_kwh', battery_cap)
+    min_soc_frac = config.get('minimum_soc_fraction', 0.0)
+    start_pct = 100 * start_soc / (battery_cap if battery_cap > 0 else 1)
+    st.markdown(f"**Start SoC:** {start_soc:,.0f} kWh ({start_pct:.0f}%) — **Min SoC (reserve):** {min_soc_frac*100:.1f}% ({battery_cap*min_soc_frac:,.0f} kWh)")
 
     st.markdown("---")
 
@@ -749,19 +977,23 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                 total_containers_swapped += detail['num_containers']
                 
                 # Determine swap mode
-                total_num_containers = int(battery_cap / config.get('battery_container_capacity_kwh', 1960))
+                total_num_containers = int(battery_cap / config.get('battery_container_capacity_kwh', 2460))
                 swap_mode = "🔄 Partial" if (detail['partial_swap_allowed'] and detail['num_containers'] < total_num_containers) else "📦 Full Set"
                 
                 soc_before_pct = (detail['soc_before'] / battery_cap) * 100
                 
                 swap_table_data.append({
                     'Station': detail['station_name'],
+                    'Total Batteries': detail.get('total_batteries', pd.NA),
                     'Mode': swap_mode,
                     'Containers': detail['num_containers'],
                     'Berth Time': f"{detail['berth_time']:.2f} hr",
                     'Returned SoC': f"{detail['soc_before']:.0f} kWh ({soc_before_pct:.0f}%)",
                     'Energy Charged': f"{detail['energy_needed']:.0f} kWh",
+                    'Charged Before': detail.get('charged_before', pd.NA),
+                    'Charged After': detail.get('charged_after', pd.NA),
                     'Hotelling': f"{detail['hotelling_energy']:.0f} kWh" if detail['hotelling_energy'] > 0 else "—",
+                    'Precharged': detail.get('precharged', 0),
                     'Service Fee': f"£{detail['service_fee']:.2f}",
                     'Energy Cost': f"£{detail['energy_charging']:.2f}",
                     'Hotelling Cost': f"£{detail['hotelling_cost']:.2f}" if detail['hotelling_cost'] > 0 else "—",
@@ -781,7 +1013,7 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                     hotelling_info = f"\n\n⚡ **Hotelling Energy**: {vessel_type_display} ({vessel_gt_display:,.0f} GT) consumed energy for onboard services (HVAC, lighting, etc.) during berth time. Total hotelling cost: £{total_hotelling_cost:.2f}"
                 
                 # Calculate partial vs full swap info
-                total_num_containers = int(battery_cap / config.get('battery_container_capacity_kwh', 1960))
+                total_num_containers = int(battery_cap / config.get('battery_container_capacity_kwh', 2460))
                 partial_swap_stations = [d for d in swap_cost_details if d['partial_swap_allowed']]
                 swap_mode_info = ""
                 if partial_swap_stations:
@@ -817,6 +1049,16 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
             
             # Don't convert booleans to text - keep them as-is for CheckboxColumn
             display_df = steps_df.copy()
+            # Normalize station inventory columns for better UI:
+            # Replace None/NaN with a readable dash and turn counts to integers
+            inv_cols = [
+                'Charged Before (BC)', 'Charged After (BC)',
+                'Total Before (BC)', 'Total After (BC)',
+                'Precharged (BC)', 'Charged During Stop (BC)'
+            ]
+            for col in inv_cols:
+                if col in display_df.columns:
+                    display_df[col] = display_df[col].apply(lambda x: '—' if pd.isna(x) or x is None else int(x))
             
             st.dataframe(
                 display_df,
@@ -835,8 +1077,18 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                     "SoC Before (kWh)": st.column_config.NumberColumn("SoC Before", format="%.1f kWh"),
                     "SoC After Operation (kWh)": st.column_config.NumberColumn("SoC After Op", format="%.1f kWh"),
                     "SoC After Segment (kWh)": st.column_config.NumberColumn("SoC After Travel", format="%.1f kWh"),
+                    "Scheduled Docking (hr)": st.column_config.NumberColumn("Scheduled Docking", format="%.2f hr"),
                     "Incremental Cost": st.column_config.NumberColumn("Step Cost", format="£%.2f"),
                     "Cumulative Cost": st.column_config.NumberColumn("Total Cost", format="£%.2f"),
+                    "Charged Before (BC)": st.column_config.TextColumn("Charged Before", width="small"),
+                    "Charged After (BC)": st.column_config.TextColumn("Charged After", width="small"),
+                    "Total Before (BC)": st.column_config.TextColumn("Total Before", width="small"),
+                    "Total After (BC)": st.column_config.TextColumn("Total After", width="small"),
+                    "Precharged (BC)": st.column_config.TextColumn("Precharged", width="small"),
+                    "Charged During Stop (BC)": st.column_config.TextColumn("Charged During Stop", width="small"),
+                    "Laden": st.column_config.CheckboxColumn("Laden", width="small"),
+                    "Must Stop (Arrival)": st.column_config.CheckboxColumn("Must Stop (Arrival)", width="small"),
+                    "Force Swap (Arrival)": st.column_config.CheckboxColumn("Force Swap (Arrival)", width="small"),
                 },
                 hide_index=True
             )
@@ -905,6 +1157,88 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
             """)
         
         st.markdown("---")
+        # Station inventory timeline
+        st.markdown("### 🧭 Station Inventory Timeline")
+        # Show vessel info for clarity
+        vessel_type_display = config.get('vessel_type', None)
+        vessel_gt_display = config.get('vessel_gt', None)
+        if vessel_type_display is not None or vessel_gt_display is not None:
+            st.markdown(f"**Vessel:** {vessel_type_display} ({vessel_gt_display} GT)")
+        st.caption("Note: '—' indicates value is not available or unlimited; numeric values are displayed where computed.")
+        station_timeline = []
+        for idx, row in steps_df.iterrows():
+            st_cfg = config.get('stations', {}).get(row['Station'], {})
+            def fmt_inv(col, cfg_key):
+                val = row.get(col)
+                if pd.isna(val) or val is None:
+                    # If station config shows None (unlimited), display 'Unlimited'
+                    if st_cfg.get(cfg_key) is None:
+                        return 'Unlimited'
+                    return '—'
+                return val
+            station_timeline.append({
+                'Time (hr)': row['Arrival (hr)'],
+                'Station': row['Station'],
+                'Operation': row['Operation'],
+                'Containers Swapped': row['Containers'],
+                'Energy Charged (kWh)': row['Energy Charged (kWh)'],
+                'Charged Before (BC)': fmt_inv('Charged Before (BC)', 'available_batteries'),
+                'Charged After (BC)': fmt_inv('Charged After (BC)', 'available_batteries'),
+                'Total Before (BC)': fmt_inv('Total Before (BC)', 'total_batteries'),
+                'Total After (BC)': fmt_inv('Total After (BC)', 'total_batteries'),
+                'Precharged (BC)': row.get('Precharged (BC)'),
+                'Charged During Stop (BC)': row.get('Charged During Stop (BC)'),
+                'Laden': row.get('Laden', True),
+                'Force Swap (Arrival)': row.get('Force Swap (Arrival)', False),
+            })
+        station_timeline_df = pd.DataFrame(station_timeline)
+        if not station_timeline_df.empty:
+            st.dataframe(station_timeline_df, width='stretch', hide_index=True)
+            # Build a compact station summary
+            station_summary = {}
+            for _, row in station_timeline_df.iterrows():
+                name = row['Station']
+                summary = station_summary.setdefault(name, {
+                    'initial_charged': None,
+                    'final_charged': None,
+                    'total_swapped': 0,
+                    'total_precharged': 0,
+                    'total_charged_during_stop': 0,
+                    'total_force_swaps': 0,
+                })
+                if summary['initial_charged'] is None:
+                    summary['initial_charged'] = row['Charged Before (BC)'] if row['Charged Before (BC)'] != '—' else None
+                summary['final_charged'] = row['Charged After (BC)']
+                summary['total_swapped'] += int(row['Containers Swapped']) if not pd.isna(row['Containers Swapped']) else 0
+                summary['total_precharged'] += int(row['Precharged (BC)']) if not pd.isna(row['Precharged (BC)']) and row['Precharged (BC)'] != '—' else 0
+                summary['total_charged_during_stop'] += int(row['Charged During Stop (BC)']) if not pd.isna(row['Charged During Stop (BC)']) and row['Charged During Stop (BC)'] != '—' else 0
+                summary['total_force_swaps'] += 1 if bool(row.get('Force Swap (Arrival)', False)) else 0
+
+            summary_rows = []
+            for name, s in station_summary.items():
+                st_cfg = config.get('stations', {}).get(name, {})
+                init_val = '—' if s['initial_charged'] is None else int(s['initial_charged'])
+                if s['initial_charged'] is None and st_cfg.get('available_batteries') is None:
+                    init_val = 'Unlimited'
+                final_val = '—' if s['final_charged'] is None or s['final_charged'] == '—' else int(s['final_charged'])
+                if (s['final_charged'] is None or s['final_charged']=='—') and st_cfg.get('available_batteries') is None:
+                    final_val = 'Unlimited'
+                summary_rows.append({
+                    'Station': name,
+                    'Initial Charged (BC)': init_val,
+                    'Final Charged (BC)': final_val,
+                    'Total Swapped (BC)': s['total_swapped'],
+                    'Total Precharged (BC)': s['total_precharged'],
+                    'Total Charged During Stops (BC)': s['total_charged_during_stop'],
+                    'Total Forced Swaps (BC)': s['total_force_swaps'],
+                })
+            summary_df = pd.DataFrame(summary_rows)
+            if not summary_df.empty:
+                st.markdown('#### 🔢 Station Summary')
+                if vessel_type_display is not None or vessel_gt_display is not None:
+                    st.caption(f"Vessel: {vessel_type_display} ({vessel_gt_display} GT)")
+                st.caption("Note: '—' indicates value is not available or unlimited; counts are integers when computed.")
+                st.dataframe(summary_df, width='stretch', hide_index=True)
         
         # Visualization Section
         st.markdown("### 📊 Decision Analysis Visualizations")
@@ -925,23 +1259,25 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
             battery_cap = config['battery_capacity_kwh']
             min_soc_kwh = battery_cap * config.get('minimum_soc_fraction', 0.2)
             
+            # Note: _safe_float_from_row is defined at start of render_results; use it here
+
             for idx, row in steps_df.iterrows():
                 segment = row['Segment']
-                soc_before = row['SoC Before (kWh)']
-                soc_after = row['SoC After Segment (kWh)']
-                energy_consumed = soc_before - soc_after
-                
-                # Check if swap happened
-                if row['Swap']:
-                    soc_before = battery_cap  # After swap
-                    energy_consumed = battery_cap - soc_after
+                # Use departure SoC (after any swap/charge operation) to compute travel energy
+                if 'SoC After Operation (kWh)' in row:
+                    soc_departure = _safe_float_from_row(row, 'SoC After Operation (kWh)')
+                else:
+                    soc_departure = _safe_float_from_row(row, 'SoC Before (kWh)')
+                soc_after = _safe_float_from_row(row, 'SoC After Segment (kWh)')
+                # Energy consumed during travel = SoC at departure - SoC at arrival
+                energy_consumed = soc_departure - soc_after
                 
                 cumulative_energy += energy_consumed
                 
                 energy_data.append({
                     'Segment': segment,
                     'Energy Consumed (kWh)': energy_consumed,
-                    'SoC Before (kWh)': soc_before,
+                    'SoC Before (kWh)': soc_departure,
                     'SoC After (kWh)': soc_after,
                     'Cumulative Energy (kWh)': cumulative_energy,
                     'Swapped': '✅' if row['Swap'] else '—'
@@ -979,6 +1315,9 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
             
             **Why Swaps Were Needed:**
             If SoC After falls below {min_soc_kwh:.1f} kWh or segment energy exceeds remaining capacity, a swap is required.
+            
+            **Note on how "Energy Used" is calculated:**
+            - The energy consumed per segment is computed as **SoC at departure (after any swap/charging)** minus **SoC at arrival**, i.e., it represents the true energy used for travel and excludes energy added by swaps/charging before departure.
             """)
         
         with viz_tab2:
@@ -1101,22 +1440,32 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
             segment_analysis = []
             for idx, row in steps_df.iterrows():
                 segment = row['Segment']
-                soc_before = row['SoC Before (kWh)']
-                soc_after = row['SoC After Segment (kWh)']
                 swapped = row['Swap']
+                # Use departure SoC (after any swap/charging) as available energy for the segment
+                # Convert to float safely using helper
+                soc_departure = _safe_float_from_row(row, 'SoC After Operation (kWh)') if 'SoC After Operation (kWh)' in row else _safe_float_from_row(row, 'SoC Before (kWh)')
+                soc_after = _safe_float_from_row(row, 'SoC After Segment (kWh)')
                 
                 # Get segment details
                 segment_key = segment.replace('->', '-')
                 distance = config.get('distances_nm', {}).get(segment_key, 0)
                 current = config.get('currents_knots', {}).get(segment_key, 0)
-                base_consumption = config.get('base_consumption_per_nm', 220)
+                # Use conservative (Laden) consumption by default for route analysis
+                base_consumption = config.get('base_consumption_laden', config.get('base_consumption_unladen', 220))
                 
-                # Calculate actual energy consumed
-                energy_consumed = soc_before - soc_after
+                # Calculate actual energy consumed for travel: departure SoC - arrival SoC
+                energy_consumed = soc_departure - soc_after
                 
-                # Calculate what was required for this segment
-                multiplier = 1.2 if current < 0 else 0.8
-                energy_required = distance * base_consumption * multiplier
+                # Calculate what was required for this segment using the same energy model
+                energy_required, _ = compute_segment_energy(
+                    distance_nm=distance,
+                    current_knots=current,
+                    mode='laden' if row.get('Laden', True) else 'unladen',
+                    base_consumption_laden=config.get('base_consumption_laden', config.get('base_consumption', 245.0)),
+                    base_consumption_unladen=config.get('base_consumption_unladen', config.get('base_consumption', 207.0)),
+                    boat_speed_laden=config.get('boat_speed_laden', config.get('boat_speed', 5.0)),
+                    boat_speed_unladen=config.get('boat_speed_unladen', config.get('boat_speed', 6.0)),
+                )
                 
                 # Status indicators
                 if swapped:
@@ -1132,11 +1481,12 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                 flow_direction = "⬆️ Upstream (harder)" if current < 0 else "⬇️ Downstream (easier)"
                 
                 segment_analysis.append({
+                    'Laden': row.get('Laden', True),
                     'Segment': segment,
                     'Distance': f"{distance:.1f} NM",
                     'Flow': flow_direction,
                     'Required': f"{energy_required:.0f} kWh",
-                    'Available': f"{soc_before:.0f} kWh",
+                    'Available': f"{soc_departure:.0f} kWh",
                     'Used': f"{energy_consumed:.0f} kWh",
                     'Remaining': f"{soc_after:.0f} kWh",
                     'Status': status
@@ -1177,7 +1527,9 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                 segment = row['Segment']
                 segment_key = segment.replace('->', '-')
                 distance = config.get('distances_nm', {}).get(segment_key, 0)
-                energy_consumed = row['SoC Before (kWh)'] - row['SoC After Segment (kWh)']
+                soc_departure = _safe_float_from_row(row, 'SoC After Operation (kWh)') if 'SoC After Operation (kWh)' in row else _safe_float_from_row(row, 'SoC Before (kWh)')
+                soc_after = _safe_float_from_row(row, 'SoC After Segment (kWh)')
+                energy_consumed = soc_departure - soc_after
                 
                 # Energy per nautical mile
                 energy_per_nm = energy_consumed / distance if distance > 0 else 0
@@ -1206,6 +1558,8 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                     swap_analysis.append({
                         'Station': detail['station_name'],
                         'SoC Before Swap': f"{detail['soc_before']:.1f} kWh ({remaining_pct:.1f}%)",
+                        'Charged Before': detail.get('charged_before', pd.NA),
+                        'Charged After': detail.get('charged_after', pd.NA),
                         'Energy Rate': f"£{detail['energy_rate']:.3f}/kWh",
                         'Service Fee': f"£{detail['service_fee']:.2f}",
                         'Energy Cost': f"£{detail['energy_charging']:.2f}",
@@ -1236,7 +1590,7 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
         
         # Download buttons
         st.markdown("### 📥 Export Results")
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         
         with col1:
             st.download_button(
@@ -1248,6 +1602,8 @@ def render_results(steps_df: pd.DataFrame, totals: Dict[str, object], config: Di
                 key="download_journey_csv",
                 help="Download detailed journey plan as CSV"
             )
+            # Indicate how the default was computed (container size × # containers)
+            pass
         
         with col2:
             st.download_button(
@@ -1291,6 +1647,8 @@ def main() -> None:
         page_icon="🚢",
         initial_sidebar_state="expanded"
     )
+    # Default run button state to avoid UnboundLocalError when used in multiple branches
+    run_button = False
 
     # Initialize authentication system
     auth_system = get_auth_system()
@@ -1308,38 +1666,49 @@ def main() -> None:
             st.session_state.username = None
             st.session_state.session_token = None
 
-    # Authentication check
-    if not st.session_state.get('authenticated', False):
-        show_login_page()
-        return
-
-    # Show user profile/logout in sidebar
+    # Authentication check + sidebar UI
+    # The sidebar controls Login/Profile and the 'Run Optimisation' button
     with st.sidebar:
-        show_logout_button()
-
-        st.markdown("---")
-
-        # Add profile management
-        with st.expander("� Profile", expanded=False):
+        if not st.session_state.get('authenticated', False):
+            show_login_page()
+        else:
             show_user_profile()
-
-        st.header("⚙️ Configuration")
+            show_logout_button()
 
         st.markdown("---")
-
-        run_button = st.button(
+        st.header("⚙️ Controls")
+        # Provide Run button in the sidebar - only actionable when user is authenticated
+        sidebar_run_button = st.button(
             "🚀 Run Optimisation",
             type="primary",
             use_container_width=True,
-            key="run_optimisation_button",
+            key="sidebar_run_optimisation_button",
             help="Click to compute the optimal battery swap strategy"
         )
+        if not st.session_state.get('authenticated', False):
+            # disable run action if not authenticated
+            sidebar_run_button = False
 
     # Main app content (only shown when authenticated)
     st.title("🚢 Marine Vessels Battery Swapping Optimiser")
     st.markdown("---")
 
     default_config = load_default_config()
+
+    # --- Callback helpers used by Sync/Align buttons to mutate widget-backed state safely ---
+    def set_battery_from_containers(vessel_key: str) -> None:
+        # Read current containers & container size from session (widget) and update the primary battery capacity
+        containers = st.session_state.get(f"num_containers_{vessel_key}", 1)
+        cont_size = st.session_state.get(f"battery_container_capacity_{vessel_key}", 2460.0)
+        st.session_state[f"battery_capacity_total_{vessel_key}"] = cont_size * containers
+
+    def set_containers_from_battery(vessel_key: str) -> None:
+        battery_cap = st.session_state.get(f"battery_capacity_total_{vessel_key}", 0.0)
+        cont_size = st.session_state.get(f"battery_container_capacity_{vessel_key}", 2460.0)
+        computed = int(math.ceil(battery_cap / cont_size)) if cont_size > 0 else 12
+        st.session_state[f"num_containers_{vessel_key}"] = computed
+
+    # align_to_optimizer_callback removed per simplified UX: users edit battery and container count directly
     
     # ========================================
     # VESSEL CONFIGURATION
@@ -1414,39 +1783,84 @@ def main() -> None:
         # SECTION 2: Key Vessel Specs (Side by side for easy comparison)
         st.markdown("### 2️⃣ Vessel Specifications")
         
-        col1, col2, col3 = st.columns(3)
+        # Gross Tonnage - full width
+        vessel_gt = st.number_input(
+            "**Gross Tonnage (GT)**",
+            min_value=100,
+            max_value=50000,
+            value=default_gt,
+            step=100,
+            key=f"vessel_gt_{vessel_type.value}",
+            help=f"Typical: {default_gt:,} GT"
+        )
         
-        with col1:
-            vessel_gt = st.number_input(
-                "**Gross Tonnage (GT)**",
-                min_value=100,
-                max_value=50000,
-                value=default_gt,
-                step=100,
-                key=f"vessel_gt_{vessel_type.value}",
-                help=f"Typical: {default_gt:,} GT"
-            )
+        st.markdown("**Performance Parameters**")
+        st.caption("⚠️ Set different Unladen/Laden values to reflect cargo effects on speed and energy consumption.")
         
-        with col2:
-            boat_speed = st.number_input(
-                "**Speed (knots)**",
+        # Create 2-column layout for Unladen vs Laden
+        col_unladen, col_laden = st.columns(2)
+        
+        # Initialize session state with correct defaults if not set or if set to 0
+        speed_unladen_key = f"vessel_speed_unladen_{vessel_type.value}"
+        speed_laden_key = f"vessel_speed_laden_{vessel_type.value}"
+        
+        if speed_unladen_key not in st.session_state or st.session_state[speed_unladen_key] == 0.0:
+            st.session_state[speed_unladen_key] = 6.0
+        if speed_laden_key not in st.session_state or st.session_state[speed_laden_key] == 0.0:
+            st.session_state[speed_laden_key] = 5.0
+        
+        with col_unladen:
+            st.markdown("**🔵 Unladen (Empty)**")
+            boat_speed_unladen = st.number_input(
+                "Speed (knots)",
                 min_value=3.0,
                 max_value=20.0,
-                value=default_speed,
+                value=6.0,
                 step=0.5,
-                key=f"vessel_speed_{vessel_type.value}",
-                help=f"Typical: {default_speed} knots"
+                key=f"vessel_speed_unladen_{vessel_type.value}",
+                help="Speed when vessel has no cargo"
+            )
+            base_consumption_unladen = st.number_input(
+                "Energy (kWh/NM)",
+                min_value=10.0,
+                max_value=500.0,
+                value=207.0,
+                step=5.0,
+                key=f"base_consumption_unladen_{vessel_type.value}",
+                help="Energy consumption when unladen"
             )
         
-        with col3:
-            base_consumption = st.number_input(
-                "**Energy (kWh/NM)**",
+        with col_laden:
+            st.markdown("**🟠 Laden (Loaded)**")
+            boat_speed_laden = st.number_input(
+                "Speed (knots)",
+                min_value=3.0,
+                max_value=20.0,
+                value=5.0,
+                step=0.5,
+                key=f"vessel_speed_laden_{vessel_type.value}",
+                help="Speed when vessel is fully loaded"
+            )
+            base_consumption_laden = st.number_input(
+                "Energy (kWh/NM)",
                 min_value=10.0,
-                max_value=400.0,
-                value=default_consumption,
+                max_value=500.0,
+                value=245.0,
                 step=5.0,
-                key=f"base_consumption_{vessel_type.value}",
-                help=f"Typical: {default_consumption} kWh/NM"
+                key=f"base_consumption_laden_{vessel_type.value}",
+                help="Energy consumption when laden"
+            )
+        
+        # Validation: Check if speeds are still 0 (debugging)
+        if boat_speed_unladen == 0.0 or boat_speed_laden == 0.0:
+            st.error(
+                f"⚠️ **CRITICAL ERROR**: Vessel speeds are set to 0!\n\n"
+                f"- Unladen Speed: {boat_speed_unladen} knots\n"
+                f"- Laden Speed: {boat_speed_laden} knots\n\n"
+                f"**This will cause zero energy consumption!**\n\n"
+                f"Please manually set the speeds above to:\n"
+                f"- Unladen: 6.0 knots\n"
+                f"- Laden: 5.0 knots"
             )
         
         # Calculate and display hotelling power
@@ -1455,37 +1869,102 @@ def main() -> None:
         
         # Key Metrics Display
         st.info(f"⚡ **Hotelling Power:** {hotelling_power:,.0f} kW  |  "
-                f"⏱️ **Average Docking Time:** {recommended_docking_time} hours")
+                f"⏱️ **Recommended Docking Time:** {recommended_docking_time} hours")
+        
+        with st.expander("ℹ️ How Laden/Unladen affects range & charging", expanded=False):
+            st.markdown("""
+            - **Laden (loaded)**: Higher consumption, potentially lower speed → requires more frequent charging/swaps
+            - **Unladen (empty)**: Lower consumption, can travel farther → better range efficiency
+            - **Charging**: Station power limits how much energy can be replenished during docking periods
+            """)
         
         st.markdown("---")
         
         # SECTION 3: Battery Configuration (Grouped together)
         st.markdown("### 3️⃣ Battery System")
         
+        # Configuration inputs
         col1, col2, col3, col4 = st.columns(4)
         
+        # Primary UX: user supplies total battery capacity (not usable). This is clearer than
+        # asking for containers directly. We'll initialize session defaults so the UI
+        # shows a sensible default based on container size (e.g., 12 containers × 2460 kWh).
+        # Ensure session state variables exist so number_input default value can be computed
+        default_container_size = default_config.get("battery_container_capacity_kwh", 2460.0)
+        if f"battery_container_capacity_{vessel_type.value}" not in st.session_state:
+            st.session_state[f"battery_container_capacity_{vessel_type.value}"] = default_container_size
+        if f"num_containers_{vessel_type.value}" not in st.session_state:
+            # Use the per-vessel default if available; otherwise fallback to 12 containers
+            st.session_state[f"num_containers_{vessel_type.value}"] = default_config.get("num_containers", 12)
+        # Compute a default battery capacity from container size × count
+        current_container_size = st.session_state.get(f"battery_container_capacity_{vessel_type.value}", default_container_size)
+        current_num_containers = st.session_state.get(f"num_containers_{vessel_type.value}", 12)
+        computed_default_battery = float(current_container_size * current_num_containers)
+        # If there's no explicit battery_capacity_total set in session, set it to the computed default
+        if f"battery_capacity_total_{vessel_type.value}" not in st.session_state:
+            st.session_state[f"battery_capacity_total_{vessel_type.value}"] = computed_default_battery
+        # Primary UX change: user enters Battery per Container (kWh) instead of total capacity
         with col1:
             battery_container_capacity = st.number_input(
-                "**Container Size (kWh)**",
-                min_value=100.0,
+                "**Battery per Container (kWh)**",
+                min_value=50.0,
                 max_value=5000.0,
-                value=1960.0,
-                step=50.0,
-                help="Standard: 1960 kWh per 20ft container"
+                value=float(current_container_size),
+                step=10.0,
+                key=f"battery_container_capacity_{vessel_type.value}",
+                on_change=set_battery_from_containers,
+                args=(vessel_type.value,),
+                help="Energy capacity per container (kWh). Total capacity = containers × per-container capacity."
             )
-        
+            # Compute and set the total battery capacity in session state (not editable directly)
+            computed_total = float(battery_container_capacity * current_num_containers)
+            st.session_state[f"battery_capacity_total_{vessel_type.value}"] = computed_total
+            # Show explanation and computed total
+            st.caption(f"Default based on: {current_num_containers} containers × {battery_container_capacity:.0f} kWh = {computed_total:,.0f} kWh")
+
+        # Keep a lightweight read-only display of the optimizer capacity if present
+        # Use the computed per-container total if present in session state (keeps the UX consistent)
+        optimizer_capacity = st.session_state.get(f"battery_capacity_total_{vessel_type.value}", default_config.get("battery_capacity_kwh", None))
+        # Container defaults (for computed syncing) - use session override when present
+        current_container_size = st.session_state.get(f"battery_container_capacity_{vessel_type.value}", 2460.0)
+        current_num_containers = st.session_state.get(f"num_containers_{vessel_type.value}", 12)
+        # Expose these values as local fallbacks for use elsewhere in the view
+        battery_container_capacity = current_container_size
+        num_containers = current_num_containers
+        # Allow user to edit container count directly in the main view (keeps UI simple but editable)
         with col2:
+            if optimizer_capacity is not None:
+                st.caption(f"Optimiser capacity: {optimizer_capacity:,.0f} kWh (usable={optimizer_capacity * (1 - (st.session_state.get(f'minimum_soc_{vessel_type.value}', 0.2) if f'minimum_soc_{vessel_type.value}' in st.session_state else 0.2) ):.0f} kWh)")
+            # If a pending update exists (from a 'Apply recommended containers' button click), apply it
+            pending_key = f"pending_num_containers_update_{vessel_type.value}"
+            if pending_key in st.session_state:
+                st.session_state[f"num_containers_{vessel_type.value}"] = st.session_state.pop(pending_key)
+                # Ensure derived capacity is recalculated after applying a pending update
+                set_battery_from_containers(vessel_type.value)
+
             num_containers = st.number_input(
                 "**# Containers**",
                 min_value=1,
-                max_value=20,
-                value=default_containers,
+                max_value=200,
+                value=current_num_containers,
                 step=1,
                 key=f"num_containers_{vessel_type.value}",
-                help=f"Typical: {default_containers}"
+                on_change=set_battery_from_containers,
+                args=(vessel_type.value,),
+                help="Number of container battery packs representing the total capacity (editable)"
             )
-        
-        battery_capacity = battery_container_capacity * num_containers
+            # Ensure our local var is in-sync with the session widget
+            num_containers = st.session_state.get(f"num_containers_{vessel_type.value}", current_num_containers)
+            # Small spacing note
+            st.caption("")
+            # Offer an option to align the battery capacity and container count with the optimiser default
+            needed_containers = int(math.ceil(optimizer_capacity / current_container_size)) if current_container_size > 0 else current_num_containers
+            col_align1, col_align2 = st.columns([3,2])
+            with col_align1:
+                st.caption(f"Optimiser capacity: {optimizer_capacity:,.1f} kWh (usable ≈ {optimizer_capacity * (1 - default_config.get('minimum_soc_fraction', 0.2)):.0f} kWh)")
+            with col_align2:
+                # Align button removed for simplified UI: users may edit Battery Capacity & Containers directly
+                st.markdown("&nbsp;")
         
         with col3:
             minimum_soc = st.number_input(
@@ -1506,89 +1985,103 @@ def main() -> None:
                 step=5.0,
                 help="Initial charge"
             ) / 100.0
-            initial_soc_kwh = battery_capacity * initial_soc_fraction
+        
+        # Determine actual battery capacity master variable from per-container × #containers
+        battery_capacity = float(st.session_state.get(f"battery_capacity_total_{vessel_type.value}", computed_default_battery))
+        initial_soc_kwh = battery_capacity * initial_soc_fraction
+        
+        # Vessel charging power
+        vessel_charging_power = st.number_input(
+            "**Max Vessel Charging (kW)**",
+            min_value=0.0,
+            max_value=5000.0,
+            value=1000.0,
+            step=50.0,
+            key=f"vessel_charging_power_{vessel_type.value}",
+            help="Maximum charging power the vessel's onboard charger can accept"
+        )
         
         # Battery System Summary
         battery_chemistry = "LFP (Lithium Iron Phosphate)"
         energy_density = 120.0
         battery_weight_kg = (battery_capacity * 1000) / energy_density
         battery_weight_tonnes = battery_weight_kg / 1000
-        max_range = battery_capacity / base_consumption if base_consumption > 0 else 0
         usable_battery = battery_capacity * (1 - minimum_soc)
-        usable_range_still_water = usable_battery / base_consumption if base_consumption > 0 else 0
         
         # Calculate realistic ranges with river flow effects
-        usable_range_downstream = (usable_battery / base_consumption) / 0.8 if base_consumption > 0 else 0
-        usable_range_upstream = (usable_battery / base_consumption) / 1.2 if base_consumption > 0 else 0
+        usable_range_downstream_unladen = (usable_battery / base_consumption_unladen) / 0.8 if base_consumption_unladen > 0 else 0
+        usable_range_downstream_laden = (usable_battery / base_consumption_laden) / 0.8 if base_consumption_laden > 0 else 0
+        usable_range_upstream_unladen = (usable_battery / base_consumption_unladen) / 1.2 if base_consumption_unladen > 0 else 0
+        usable_range_upstream_laden = (usable_battery / base_consumption_laden) / 1.2 if base_consumption_laden > 0 else 0
+        # Still water (zero current) ranges
+        usable_range_still_water_unladen = usable_battery / base_consumption_unladen if base_consumption_unladen > 0 else 0
+        usable_range_still_water_laden = usable_battery / base_consumption_laden if base_consumption_laden > 0 else 0
+        # Expose max ranges for diagnostics and summaries
+        max_range_unladen = usable_range_still_water_unladen
+        max_range_laden = usable_range_still_water_laden
         
         weight_ratio = (battery_weight_tonnes / vessel_gt) * 100 if vessel_gt > 0 else 0
-        
-        col1, col2, col3, col4 = st.columns(4)
+
+        # (Per-segment feasibility checks moved to route/params validation section to avoid depending on route variables here)
+
+        # Key metrics display
+        st.markdown("**📊 System Overview**")
+        col1, col2, col3, col4, col5 = st.columns(5)
         with col1:
             st.metric("**Total Capacity**", f"{battery_capacity/1000:.1f} MWh", 
                      help=f"{battery_capacity:,.0f} kWh")
         with col2:
-            st.metric("**Range (Downstream)**", f"{usable_range_downstream:.0f} NM",
-                     help=f"⬇️ With flow (0.8× energy) | {usable_battery:,.0f} kWh usable",
+            st.metric("**Range (Downstream)**", f"{usable_range_downstream_unladen:.0f}/{usable_range_downstream_laden:.0f} NM",
+                     help=f"Unladen/Laden downstream ranges (Unladen / Laden)",
                      delta="Best case")
         with col3:
-            st.metric("**Range (Upstream)**", f"{usable_range_upstream:.0f} NM",
-                     help=f"⬆️ Against flow (1.2× energy) | {usable_battery:,.0f} kWh usable",
+            st.metric("**Range (Still Water)**", f"{usable_range_still_water_unladen:.0f}/{usable_range_still_water_laden:.0f} NM",
+                     help=f"Unladen/Laden still water (no current) ranges (Unladen / Laden)")
+        with col4:
+            st.metric("**Range (Upstream)**", f"{usable_range_upstream_unladen:.0f}/{usable_range_upstream_laden:.0f} NM",
+                     help=f"Unladen/Laden upstream ranges (Unladen / Laden)",
                      delta="Worst case",
                      delta_color="inverse")
-        with col4:
+        with col5:
             st.metric("**Battery Weight**", f"{battery_weight_tonnes:.1f} t",
                      help=f"{weight_ratio:.1f}% of vessel GT")
-        
-        # Range explanation
-        st.info(f"""
-        📊 **Range Analysis** ({usable_battery:,.0f} kWh usable @ {base_consumption:.0f} kWh/NM):
-        • **Downstream (⬇️)**: {usable_range_downstream:.0f} NM - traveling with river flow (0.8× energy)
-        • **Still Water**: {usable_range_still_water:.0f} NM - no current (1.0× energy)  
-        • **Upstream (⬆️)**: {usable_range_upstream:.0f} NM - against river flow (1.2× energy)
-        
-        ⚠️ **Important**: Your actual range per segment depends on river flow direction!
-        """)
+
+        # Detailed range analysis in expander
+        with st.expander("ℹ️ Detailed Range Analysis", expanded=False):
+            
+            st.markdown(f"""
+            **Usable Battery:** {usable_battery:,.0f} kWh ({(1-minimum_soc)*100:.0f}% of total capacity)
+            
+            **Unladen (Empty Vessel)**
+            - Downstream (⬇️): {usable_range_downstream_unladen:.0f} NM - with river flow (0.8× energy)
+            - Still Water: {usable_range_still_water_unladen:.0f} NM - no current (1.0× energy)
+            - Upstream (⬆️): {usable_range_upstream_unladen:.0f} NM - against river flow (1.2× energy)
+            
+            **Laden (Loaded Vessel)**
+            - Downstream (⬇️): {usable_range_downstream_laden:.0f} NM
+            - Still Water: {usable_range_still_water_laden:.0f} NM
+            - Upstream (⬆️): {usable_range_upstream_laden:.0f} NM
+            
+            ⚠️ **Note:** Actual range per segment depends on vessel load and river flow direction.
+            """)
         
         st.markdown("---")
         
         # SECTION 4: Journey Settings (Grouped together)
-        st.markdown("### 4️⃣ Journey Settings")
+        # NOTE: 'Departure Time' and 'Journey Settings' are now merged into the
+        # Route Configuration expander so users configure route + start time together.
         
-        start_time = st.number_input(
-            "**Departure Time (24h)**",
-            min_value=0.0,
-            max_value=23.5,
-            value=8.0,
-            step=0.5,
-            key="departure_time_hr",
-            help="Journey start time"
-        )
-        
-        # Hidden - use fixed SoC precision internally
-        soc_step = 10.0  # Fixed at 20 kWh for optimal balance
-        
-        # Advanced Details (Collapsed by default)
-        with st.expander("� **Detailed Performance Metrics**", expanded=False):
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("**Battery System:**")
-                st.write(f"- Containers: {num_containers} × {battery_container_capacity:.0f} kWh")
-                st.write(f"- Total: {battery_capacity:,.0f} kWh ({battery_capacity/1000:.2f} MWh)")
-                st.write(f"- Usable: {usable_battery:,.0f} kWh ({(1-minimum_soc)*100:.0f}%)")
-                st.write(f"- Weight: {battery_weight_tonnes:.2f} tonnes")
-                st.write(f"- Weight/Container: {battery_weight_tonnes/num_containers:.2f} t")
-            
-            with col2:
-                st.markdown("**Vessel Performance:**")
-                st.write(f"- Type: {vessel_type.value}")
-                st.write(f"- GT: {vessel_gt:,}")
-                st.write(f"- Battery/GT: {weight_ratio:.2f}%")
-                st.write(f"- Speed: {boat_speed:.1f} knots")
-                st.write(f"- Consumption: {base_consumption:.1f} kWh/NM")
-                st.write(f"- Hotelling: {hotelling_power:,.0f} kW")
-        
+        # Initialize container/session defaults (keep UI simple: no advanced controls)
+        default_container_size = default_config.get("battery_container_capacity_kwh", 2460.0)
+        # Ensure session state variables exist (not shown in UI) so callbacks function
+        if f"battery_container_capacity_{vessel_type.value}" not in st.session_state:
+            st.session_state[f"battery_container_capacity_{vessel_type.value}"] = default_container_size
+        if f"num_containers_{vessel_type.value}" not in st.session_state:
+            st.session_state[f"num_containers_{vessel_type.value}"] = default_config.get("num_containers", 12)
+        # Refresh local copies of these values
+        battery_container_capacity = st.session_state.get(f"battery_container_capacity_{vessel_type.value}", default_container_size)
+        num_containers = st.session_state.get(f"num_containers_{vessel_type.value}", 12)
+
         # Reference Data (Hidden for simplified UI - removed)
 
     # Interactive Form (always shown)
@@ -1597,10 +2090,23 @@ def main() -> None:
         # ROUTE CONFIGURATION
         # ========================================
         with st.expander("🗺️ **ROUTE CONFIGURATION**", expanded=True):
-            st.markdown("### Define Your Journey")
+            st.markdown("### Journey Planning")
             
-            col1, col2 = st.columns([1, 2])
+            # Departure time and number of stations in one row
+            col1, col2 = st.columns([1, 1])
+            
             with col1:
+                start_time = st.number_input(
+                    "**Departure Time (24h)**",
+                    min_value=0.0,
+                    max_value=23.5,
+                    value=8.0,
+                    step=0.5,
+                    key="departure_time_hr",
+                    help="Journey start time"
+                )
+            
+            with col2:
                 num_stations = st.number_input(
                     "**Number of Stations**",
                     min_value=2,
@@ -1610,13 +2116,17 @@ def main() -> None:
                     help="Total stations including start and end"
                 )
             
-            with col2:
-                st.info(f"✓ **{num_stations}** stations → **{num_stations-1}** segments to configure")
+            st.info(f"✓ **{num_stations}** stations → **{num_stations-1}** segments to configure")
             
             st.markdown("---")
             
-            # Generate station names in a cleaner grid
+            # Station names in a cleaner grid
             st.markdown("**🏪 Station Names**")
+            st.caption("Define the names of each station along your route")
+            
+            # Fixed SoC step for optimization
+            soc_step = 10.0  # kWh precision for state-of-charge calculations
+            
             
             # Create rows of 5 columns each
             station_names = []
@@ -1641,7 +2151,7 @@ def main() -> None:
             
             # Segment Configuration - cleaner presentation
             st.markdown("**🛤️ Segment Details**")
-            st.caption("💡 Upstream = against flow (1.2× energy) | Downstream = with flow (0.8× energy)")
+            st.caption("💡 Upstream = against flow (1.2× energy) | Downstream = with flow (0.8× energy) | Neutral = no flow (1.0× energy)")
             
             # Build segment data based on current stations
             segment_rows = []
@@ -1652,11 +2162,10 @@ def main() -> None:
                 
                 # Try to get default values if they exist
                 default_dist = default_config["distances_nm"].get(key, 40.0)
-                default_curr = default_config["currents_knots"].get(key, 0.0)
                 
-                # Convert to absolute value and direction
-                flow_speed = abs(default_curr)
-                flow_direction = "Upstream" if default_curr < 0 else "Downstream"
+                # Default to zero flow (no current)
+                flow_speed = 0.0
+                flow_direction = "Downstream"
                 
                 segment_rows.append({
                     "From": start_name,
@@ -1708,6 +2217,60 @@ def main() -> None:
                 "Direction": "Direction"
             })
 
+            st.markdown("---")
+            
+            # Vessel-specific segment configuration
+            st.markdown("**🚤 Vessel Segment Configuration**")
+            st.caption("⚠️ Configure settings for each segment. 'Docking Time' and 'Must Stop' apply to the ARRIVAL station (the 'To' station).")
+            
+            # Use station_names to create vessel segment configuration
+            vessel_segment_rows = []
+            for i in range(len(station_names) - 1):
+                a = station_names[i]
+                b = station_names[i + 1]
+                
+                # If departing FROM station C, it's the return journey (unladen)
+                if a.upper() == 'C':
+                    default_laden = False  # Unladen on return
+                else:
+                    default_laden = True  # Laden on outward journey
+                
+                # Special defaults for station C
+                if b.upper() == 'C':
+                    default_dock = 4.0  # 4 hours at station C
+                    default_must_stop = True
+                else:
+                    # Default: no docking time for arrivals unless explicitly set per segment
+                    default_dock = 0.0
+                    default_must_stop = False
+                vessel_segment_rows.append({
+                    "From": a,
+                    "To (Arrival)": b,
+                    "Laden": default_laden,
+                    "Must Stop": default_must_stop,
+                    "Force Swap": False,
+                    "Docking (hr)": default_dock,
+                })
+            if not vessel_segment_rows:
+                vessel_segments_df = pd.DataFrame(columns=["From", "To (Arrival)", "Laden", "Must Stop", "Force Swap", "Docking (hr)"])
+            else:
+                vessel_segments_df = pd.DataFrame(vessel_segment_rows)
+                vessel_segments_df = st.data_editor(
+                    vessel_segments_df,
+                    width='stretch',
+                    key="vessel_route_segments_editor",
+                    column_config={
+                        "From": st.column_config.TextColumn("From", width="small", disabled=True),
+                        "To (Arrival)": st.column_config.TextColumn("To (Arrival)", width="medium", disabled=True, help="Arrival station where docking occurs"),
+                        "Laden": st.column_config.CheckboxColumn("Laden", width="small", help="Is vessel loaded with cargo?"),
+                        "Must Stop": st.column_config.CheckboxColumn("Must Stop", width="small", help="Force stop at arrival station"),
+                        "Force Swap": st.column_config.CheckboxColumn("Force Swap", width="small", help="Force battery swap at arrival station"),
+                        "Docking (hr)": st.column_config.NumberColumn("Docking (hr)", format="%.1f", help="Docking time at arrival station", min_value=0.0, step=0.5),
+                    },
+                    hide_index=True
+                )
+                st.caption("💡 Example: Row 'A → C' means traveling from A to C. 'Must Stop' and 'Docking' apply to station C (arrival).")
+
         # ========================================
         # STATION CONFIGURATION
         # ========================================
@@ -1717,52 +2280,105 @@ def main() -> None:
             # QUICK SETTINGS - Apply to All
             st.markdown("#### ⚡ Quick Apply to All Stations")
             
-            col1, col2, col3 = st.columns(3)
+            # Two quick settings columns - docking time removed (per-vessel schedule only)
+            col1, col2 = st.columns(2)
             
             with col1:
-                global_docking_time = st.number_input(
-                    "**Docking Time (hr)**",
-                    min_value=0.0,
-                    max_value=12.0,
-                    value=recommended_docking_time,
-                    step=0.25,
-                    key="global_docking_time",
-                    help=f"Recommended: {recommended_docking_time}h for {vessel_type.value}"
-                )
-            
-            with col2:
                 global_charging_power = st.number_input(
                     "**Charging (kW)**",
                     min_value=0.0,
-                    max_value=2000.0,
-                    value=250.0,
+                    max_value=5000.0,
+                    value=2000.0,
                     step=50.0,
                     key="global_charging_power",
                     help="Shore power capacity"
                 )
+                # Optional: global charged battery counts that can be applied to all stations
+                global_charged_batteries = st.number_input(
+                    "**Charged Batteries (All Stations)**",
+                    min_value=0,
+                    max_value=100,
+                    value=21,
+                    step=1,
+                    key="global_charged_batteries",
+                    help="Apply a uniform initial charged battery count to all stations"
+                )
+                # Optional: global total batteries
+                global_total_batteries = st.number_input(
+                    "**Total Batteries (All Stations)**",
+                    min_value=0,
+                    max_value=100,
+                    value=21,
+                    step=1,
+                    key="global_total_batteries",
+                    help="Apply a uniform total battery stock to all stations"
+                )
             
-            with col3:
+            with col2:
                 global_partial_swap = st.checkbox(
                     "**Partial Swap**",
                     value=False,
                     key="global_partial_swap",
                     help="Only swap depleted containers (cost-saving)"
                 )
+            # Option to apply these quick settings to all station widgets
+            apply_quick_all = st.button("Apply these settings to all stations", key="quick_apply_all")
+            if apply_quick_all:
+                # gather station names (it will exist after route configuration). If not present, skip.
+                station_names_list = station_names if 'station_names' in locals() else []
+                if not station_names_list:
+                    st.warning("No station names configured yet. Configure stations first before applying quick settings.")
+                else:
+                    unique_station_names = list(dict.fromkeys(station_names_list))
+                    for idx, sname in enumerate(unique_station_names):
+                        # Update charging power for each station widget key (explicitly to correct key)
+                        st.session_state[f"charging_power_{idx}_{sname}"] = float(global_charging_power)
+                        # Two keys used for partial swap (global vs station level); set both to be safe
+                        st.session_state[f"partial_global_{idx}_{sname}"] = bool(global_partial_swap)
+                        st.session_state[f"partial_{idx}_{sname}"] = bool(global_partial_swap)
+                        # Optional: apply global charged/total battery counts if provided
+                        # Apply global charged/total battery counts (use local variables defined above)
+                        try:
+                            st.session_state[f"charged_batteries_{idx}_{sname}"] = int(global_charged_batteries)
+                            st.session_state[f"total_batteries_{idx}_{sname}"] = int(global_total_batteries)
+                        except Exception:
+                            # Defensive programming: don't let an unexpected type or key cause a crash in the UI
+                            pass
+                    # Rerun to update the UI with new defaults (safe call)
+                    getattr(st, 'experimental_rerun', lambda: None)()
             
             st.markdown("---")
             
             # INDIVIDUAL STATION CONTROLS - More compact tabs
             st.markdown("#### � Individual Station Controls")
             
-            # Create tabs for each station (more compact than expanders)
-            station_tabs = st.tabs([f"🏪 {name}" for name in station_names])
+            # Create tabs for each UNIQUE station (more compact than expanders)
+            # Use dict.fromkeys to preserve order while removing duplicates
+            unique_station_names = list(dict.fromkeys(station_names))
+            station_tabs = st.tabs([f"🏪 {name}" for name in unique_station_names])
             
             station_rows = []
-            for idx, (tab, name) in enumerate(zip(station_tabs, station_names)):
+            for idx, (tab, name) in enumerate(zip(station_tabs, unique_station_names)):
                 with tab:
                     # Try to get default values if they exist
                     default_swap_settings = default_config.get("swap_settings", {})
-                    default_station = default_swap_settings.get(name, {})
+                    default_station = dict(default_swap_settings.get(name, {}))
+                    # Ensure station charged battery defaults are feasible wrt num_containers
+                    # If station supports swaps, make sure station has at least `num_containers` batteries if that is meaningful
+                    try:
+                        desired_containers = int(num_containers)
+                    except Exception:
+                        desired_containers = None
+                    if default_station.get("allow_swap", True) and desired_containers is not None:
+                        # Cap totals to a reasonable upper bound (e.g., 50)
+                        cap_batteries = 50
+                        total_default = default_station.get("total_batteries", default_station.get("available_batteries", desired_containers))
+                        if total_default is None:
+                            total_default = desired_containers
+                        if total_default < desired_containers:
+                            adjusted_total = min(max(total_default, desired_containers), cap_batteries)
+                            default_station["total_batteries"] = adjusted_total
+                            default_station["available_batteries"] = adjusted_total
                     
                     # Two-column layout for compact presentation
                     col_left, col_right = st.columns(2)
@@ -1770,39 +2386,27 @@ def main() -> None:
                     with col_left:
                         st.markdown("**⚙️ Operations**")
                         
-                        # Mandatory stop - vessel must dock here regardless of battery needs
-                        mandatory_stop = st.checkbox(
-                            "Mandatory Stop",
-                            value=default_station.get("mandatory_stop", idx == 0 or idx == len(station_names) - 1),
-                            key=f"mandatory_{name}",
-                            help="Vessel MUST dock here (scheduled stop, passenger pickup, etc.). Optimizer will decide what action to take."
-                        )
                         
                         allow_swap = st.checkbox(
                             "Allow Swap",
                             value=default_station.get("allow_swap", True),
-                            key=f"allow_{name}"
+                            key=f"allow_{idx}_{name}"
                         )
                         
                         charging_allowed = st.checkbox(
                             "Allow Charging",
                             value=default_station.get("charging_allowed", True),
-                            key=f"charging_{name}"
+                            key=f"charging_{idx}_{name}"
                         )
                         
-                        force_swap = st.checkbox(
-                            "Force Swap",
-                            value=default_station.get("force_swap", False),
-                            key=f"force_{name}",
-                            help="Require swap for inspection/maintenance"
-                        )
+                        # 'Force Swap' is now a per-vessel route setting: remove station-level control
                         
                         # Partial swap: controlled by global setting when enabled
                         if global_partial_swap:
                             st.checkbox(
                                 "Partial Swap Allowed",
                                 value=True,
-                                key=f"partial_global_{name}",
+                                key=f"partial_global_{idx}_{name}",
                                 disabled=True,
                                 help="Controlled by global setting"
                             )
@@ -1811,7 +2415,7 @@ def main() -> None:
                             partial_swap = st.checkbox(
                                 "Partial Swap Allowed",
                                 value=default_station.get("partial_swap_allowed", False),
-                                key=f"partial_{name}"
+                                key=f"partial_{idx}_{name}"
                             )
                         
                         st.markdown("**⏰ Operating Hours**")
@@ -1821,7 +2425,7 @@ def main() -> None:
                             max_value=24.0,
                             value=default_station.get("open_hour", 0.0),
                             step=0.5,
-                            key=f"open_{name}"
+                            key=f"open_{idx}_{name}"
                         )
                         
                         close_hour = st.number_input(
@@ -1830,21 +2434,15 @@ def main() -> None:
                             max_value=24.0,
                             value=default_station.get("close_hour", 24.0),
                             step=0.5,
-                            key=f"close_{name}"
+                            key=f"close_{idx}_{name}"
                         )
                     
                     with col_right:
                         st.markdown("**⏱️ Operations**")
                         
-                        station_docking_time = st.number_input(
-                            "Docking Time (hr)",
-                            min_value=0.0,
-                            max_value=12.0,
-                            value=global_docking_time,
-                            step=0.25,
-                            key=f"docking_time_{name}_{global_docking_time}",
-                            help="Duration for operations: battery swap (30 min - 1 hr), charging (variable), or mandatory stop duration. Set to 0.0 for pass-through stations."
-                        )
+                        # Station docking time is available as a station default but UI control removed; use Vessel Route editor for per-vessel schedule overrides
+                        # Fallback to 0.0 so that pass-through stations default to no docking unless explicitly configured
+                        station_default_docking_time = default_station.get("docking_time_hr", 0.0)
                         
                         st.markdown("**🔌 Charging & Batteries**")
                         
@@ -1852,19 +2450,24 @@ def main() -> None:
                             "Charging Power (kW)",
                             min_value=0.0,
                             max_value=2000.0,
-                            value=global_charging_power,
+                            value=default_station.get("charging_power_kw", global_charging_power),
                             step=50.0,
-                            key=f"charging_power_{name}_{global_charging_power}"
+                            key=f"charging_power_{idx}_{name}",
                         )
                         
                         # Show charging capacity info
-                        if station_charging_power > 0 and station_docking_time > 0:
-                            max_energy_charged = station_charging_power * station_docking_time * 0.95
+                        if station_charging_power > 0 and station_default_docking_time > 0:
+                            max_energy_charged = station_charging_power * station_default_docking_time * 0.95
                             pct_of_battery = (max_energy_charged / battery_capacity * 100) if battery_capacity > 0 else 0
                             if pct_of_battery < 100:
-                                st.caption(f"⚡ Can charge ~{max_energy_charged:.0f} kWh in {station_docking_time}h ({pct_of_battery:.1f}% of battery)")
+                                st.caption(f"⚡ Can charge ~{max_energy_charged:.0f} kWh in {station_default_docking_time}h ({pct_of_battery:.1f}% of battery)")
                             else:
-                                st.caption(f"⚡ Can fully charge battery in {station_docking_time}h")
+                                st.caption(f"⚡ Can fully charge battery in {station_default_docking_time}h")
+                            # Containers that can be charged at station during docking
+                            if station_charging_power > 0 and battery_container_capacity > 0:
+                                containers_chargeable = int(max_energy_charged // battery_container_capacity)
+                                if containers_chargeable > 0:
+                                    st.caption(f"🔋 Can charge ~{containers_chargeable} container(s) in {station_default_docking_time}h at {station_charging_power} kW")
                         
                         station_charging_fee = st.number_input(
                             "Charging Fee (£)",
@@ -1872,7 +2475,7 @@ def main() -> None:
                             max_value=100.0,
                             value=25.0,  # UK realistic: £10-£50 per session
                             step=5.0,
-                            key=f"charging_fee_{name}",
+                            key=f"charging_fee_{idx}_{name}",
                             help="UK realistic: £10-£50 per charging session"
                         )
                         
@@ -1884,7 +2487,7 @@ def main() -> None:
                             max_value=200.0,
                             value=default_station.get("base_service_fee", 15.0),  # UK realistic: £8-£40 per container
                             step=5.0,
-                            key=f"base_service_fee_{name}",
+                            key=f"base_service_fee_{idx}_{name}",
                             help="Cost per container swapped (includes handling and operations)"
                         )
                         
@@ -1895,17 +2498,26 @@ def main() -> None:
                             value=default_station.get("degradation_fee_per_kwh", 0.03),  # Default to 0.03 (£0.03/kWh wear cost)
                             step=0.01,
                             format="%.3f",
-                            key=f"degradation_fee_{name}",
+                            key=f"degradation_fee_{idx}_{name}",
                             help="Battery degradation cost per kWh charged (default £0.03/kWh)"
                         )
                         
-                        batteries = st.number_input(
-                            "Battery Stock",
+                        charged_batteries = st.number_input(
+                            "Charged Batteries",
                             min_value=0,
                             max_value=50,
-                            value=default_station.get("available_batteries", 7),
-                            key=f"batteries_{name}",
-                            help="Fully charged containers available"
+                            value=default_station.get("available_batteries", 17),
+                            key=f"charged_batteries_{idx}_{name}",
+                            help="Fully charged containers immediately available for swapping"
+                        )
+
+                        total_batteries = st.number_input(
+                            "Total Battery Stock",
+                            min_value=0,
+                            max_value=100,
+                            value=default_station.get("total_batteries", default_station.get("available_batteries", 17)),
+                            key=f"total_batteries_{idx}_{name}",
+                            help="Total battery containers kept at station (charged + spare/unavailable)"
                         )
                         
                         st.markdown("**💰 Energy Cost**")
@@ -1916,49 +2528,136 @@ def main() -> None:
                             value=default_station.get("energy_cost_per_kwh", 0.25),  # UK realistic: £0.16-£0.40/kWh
                             step=0.01,
                             format="%.3f",
-                            key=f"energy_cost_{name}",
+                            key=f"energy_cost_{idx}_{name}",
                             help="UK realistic: £0.16-£0.40/kWh (typical £0.25)"
                         )
                     
                     # Collect data from UI elements
+                    # Collect data from UI elements
                     station_rows.append({
                         "Station": name,
-                        "Mandatory Stop": mandatory_stop,
                         "Allow Swap": allow_swap,
-                        "Force Swap": force_swap,
                         "Partial Swap": partial_swap,
                         "Charging Allowed": charging_allowed,
-                        "Docking Time (hr)": station_docking_time,
                         "Charging Power (kW)": station_charging_power,
                         "Charging Fee (£)": station_charging_fee,
                         "Base Service Fee": base_service_fee,
                         "Battery Wear Fee": degradation_fee_per_kwh,
                         "Open Hour": open_hour,
                         "Close Hour": close_hour,
-                        "Available Batteries": batteries,
+                        "Charged Batteries": charged_batteries,
+                        "Total Batteries": total_batteries,
                         "Energy Cost (£/kWh)": energy_cost_station,
                     })
             
             stations_df = pd.DataFrame(station_rows)
 
+    # ======= Per-segment energy feasibility checks (validate route vs battery) ========
+    infeasible_segments = []
+    if 'segments_df' in locals() and segments_df is not None and not segments_df.empty:
+        usable_energy_kwh = battery_capacity - (battery_capacity * minimum_soc)
+        for _, r in segments_df.iterrows():
+            seg_start = str(r.get('Start'))
+            seg_end = str(r.get('End'))
+            seg_dist = float(r.get('Distance (NM)', 0.0))
+            # Use per-vessel flag if available to choose mode
+            mode = 'laden'
+            if 'vessel_segments_df' in locals() and vessel_segments_df is not None:
+                m = vessel_segments_df.loc[(vessel_segments_df['From'] == seg_start) & (vessel_segments_df['To (Arrival)'] == seg_end)]
+                if not m.empty:
+                    mode = 'laden' if bool(m.iloc[0].get('Laden', True)) else 'unladen'
+            current_knots = float(r.get('Flow Speed (knots)', 0.0))
+            seg_energy, _ = compute_segment_energy(seg_dist, current_knots, mode=mode, base_consumption_laden=base_consumption_laden, base_consumption_unladen=base_consumption_unladen, boat_speed_laden=boat_speed_laden, boat_speed_unladen=boat_speed_unladen)
+            if seg_energy > usable_energy_kwh:
+                # Compute recommended container count to allow this segment without breaching min SoC
+                # We need battery_capacity * (1 - min_soc) >= seg_energy -> battery_capacity >= seg_energy / (1 - min_soc)
+                needed_total_kwh = seg_energy / (1.0 - (minimum_soc if minimum_soc is not None else 0.0))
+                needed_containers = int(math.ceil(needed_total_kwh / battery_container_capacity)) if battery_container_capacity > 0 else None
+                infeasible_segments.append((seg_start, seg_end, seg_energy, usable_energy_kwh, needed_containers))
+    if infeasible_segments:
+        with st.expander("⚠️ Segment Feasibility Issues", expanded=True):
+            st.warning("The following segments require more usable energy than your current battery configuration allows. Consider increasing container count, lowering Min SoC, or enabling swaps/charging at intermediate stations.")
+            for (a, b, seg_e, usable_e, needed_containers) in infeasible_segments:
+                st.markdown(f"- Segment **{a} → {b}**: requires **{seg_e:,.0f} kWh**; usable battery ≈ **{usable_e:,.0f} kWh**.")
+                if needed_containers:
+                    col_fix1, col_fix2 = st.columns([3,1])
+                    with col_fix1:
+                        st.caption(f"Recommended containers to allow this segment without breaching min SoC: **{needed_containers}** (current: {num_containers})")
+                    with col_fix2:
+                        if st.button(f"Apply {needed_containers} containers", key=f"apply_needed_containers_{a}_{b}_{vessel_type.value}"):
+                            # Defer setting the widget-bound session_state until widget is recreated to avoid Streamlit errors
+                            st.session_state[f"pending_num_containers_update_{vessel_type.value}"] = needed_containers
+                            # Rerun if available to refresh UI values
+                            getattr(st, 'experimental_rerun', lambda: None)()
+
     params = {
-        "boat_speed": boat_speed,
-        "base_consumption": base_consumption,
+        # 'boat_speed' retained for backwards compatibility but derived from unladen speed
+        "boat_speed": boat_speed_unladen,
+        "boat_speed_laden": boat_speed_laden,
+        "boat_speed_unladen": boat_speed_unladen,
+        # 'base_consumption' retained for backwards compatibility but derived from laden consumption
+        "base_consumption": base_consumption_laden,
+        "base_consumption_laden": base_consumption_laden,
+        "base_consumption_unladen": base_consumption_unladen,
         "battery_capacity": battery_capacity,
         "battery_container_capacity": battery_container_capacity,
+        "num_containers": num_containers,
         "initial_soc_kwh": initial_soc_kwh,
         "minimum_soc": minimum_soc,
         "soc_step": soc_step,
         "start_time": start_time,
         "vessel_type": vessel_type.value,
         "vessel_gt": vessel_gt,
+        "vessel_charging_power": vessel_charging_power,
     }
+
+    # Use either the sidebar run button (if set) or the main run button (backwards compatibility)
+    run_button = sidebar_run_button
 
     if run_button:
         try:
             with st.status("⚙️ **Preparing optimisation...**", expanded=True) as status:
                 st.write("🔍 Validating configuration...")
-                config = form_frames_to_config(route_text, segments_df, stations_df, params, default_config)
+                # Provide vessel-segment flags and vessel_route_text to form parser
+                vessel_route_text_val = st.session_state.get(f"vessel_route_text_{vessel_type.value}", None)
+                # Prefer per-vessel route_text if provided, else use global route_text
+                input_route_text = vessel_route_text_val or route_text
+                
+                # Determine segments input and ensure it has physical data (distance/flow)
+                if 'vessel_segments_df' in locals() and vessel_segments_df is not None:
+                    # If using vessel-specific segments, they might lack physical data. 
+                    # Merge it from the global segments_df.
+                    segments_input = vessel_segments_df.copy()
+                    
+                    # Create lookup maps from global segments
+                    dist_map = {}
+                    flow_map = {}
+                    dir_map = {}
+                    
+                    # Check if global segments_df has data
+                    if 'segments_df' in locals() and not segments_df.empty:
+                        for _, r in segments_df.iterrows():
+                            # Key by Start-End
+                            key = (str(r.get('Start')), str(r.get('End')))
+                            dist_map[key] = r.get('Distance (NM)', 0.0)
+                            flow_map[key] = r.get('Flow Speed (knots)', 0.0)
+                            dir_map[key] = r.get('Direction', 'Downstream')
+                            
+                    # Apply lookups to fill missing physical columns
+                    # Note: vessel_segments_df uses 'From'/'To (Arrival)' columns
+                    segments_input['Distance (NM)'] = segments_input.apply(
+                        lambda x: dist_map.get((str(x['From']), str(x['To (Arrival)'])), 0.0), axis=1
+                    )
+                    segments_input['Flow Speed (knots)'] = segments_input.apply(
+                        lambda x: flow_map.get((str(x['From']), str(x['To (Arrival)'])), 0.0), axis=1
+                    )
+                    segments_input['Direction'] = segments_input.apply(
+                        lambda x: dir_map.get((str(x['From']), str(x['To (Arrival)'])), 'Downstream'), axis=1
+                    )
+                else:
+                    segments_input = segments_df
+                
+                config = form_frames_to_config(input_route_text, segments_input, stations_df, params, default_config, vessel_segments_df=vessel_segments_df if 'vessel_segments_df' in locals() else None, vessel_route_text=vessel_route_text_val)
                 st.write("✅ Configuration validated")
                 status.update(label="✅ **Configuration ready**", state="complete")
         except Exception as exc:
@@ -1979,12 +2678,62 @@ def main() -> None:
                     route = config.get('route', [])
                     total_distance = sum(config.get('distances_nm', {}).values())
                     battery_capacity = config.get('battery_capacity_kwh', 0)
-                    base_consumption = config.get('base_consumption_per_nm', 0)
+                    base_consumption = config.get('base_consumption_laden', config.get('base_consumption_unladen', 0))
                     min_soc_fraction = config.get('minimum_soc_fraction', 0)
                     
+                    # Echo SoC settings chosen by user (for traceability)
+                    initial_soc_val = config.get('initial_soc_kwh', 0.0)
+                    min_soc_frac = config.get('minimum_soc_fraction', 0.0)
+                    st.info(f"Start SoC: {initial_soc_val:,.0f} kWh ({100*initial_soc_val/config.get('battery_capacity_kwh',1):.0f}% of battery)")
+                    st.info(f"Min SoC (reserve): {min_soc_frac*100:.1f}% ({config.get('battery_capacity_kwh',0)*min_soc_frac:,.0f} kWh)")
+
                     # Calculate theoretical range
                     usable_battery = battery_capacity * (1 - min_soc_fraction)
-                    max_range = usable_battery / base_consumption if base_consumption > 0 else 0
+                    
+                    # Calculate realistic range based on route conditions (weighted average)
+                    total_energy_laden = 0.0
+                    total_energy_unladen = 0.0
+                    
+                    # Get vessel params
+                    bs_laden = config.get('boat_speed_laden', 5.0)
+                    bs_unladen = config.get('boat_speed_unladen', 6.0)
+                    bc_laden = config.get('base_consumption_laden', 245.0)
+                    bc_unladen = config.get('base_consumption_unladen', 207.0)
+                    
+                    for i in range(len(route) - 1):
+                        start = route[i]
+                        end = route[i + 1]
+                        key = f"{start}-{end}"
+                        dist = config.get('distances_nm', {}).get(key, 0)
+                        curr = config.get('currents_knots', {}).get(key, 0)
+                        
+                        # Range Check: Max Range Laden/Unladen
+                        e_laden, _ = compute_segment_energy(
+                            distance_nm=dist,
+                            current_knots=curr,
+                            mode="laden",
+                            base_consumption_laden=bc_laden,
+                            base_consumption_unladen=bc_unladen,
+                            boat_speed_laden=bs_laden,
+                            boat_speed_unladen=bs_unladen
+                        )
+                        e_unladen, _ = compute_segment_energy(
+                             distance_nm=dist,
+                            current_knots=curr,
+                            mode="unladen",
+                            base_consumption_laden=bc_laden,
+                            base_consumption_unladen=bc_unladen,
+                            boat_speed_laden=bs_laden,
+                            boat_speed_unladen=bs_unladen
+                        )
+                        
+                        total_energy_laden += e_laden
+                        total_energy_unladen += e_unladen
+                        
+                    avg_consumption_laden = total_energy_laden / total_distance if total_distance > 0 else bc_laden
+                    avg_consumption_unladen = total_energy_unladen / total_distance if total_distance > 0 else bc_unladen
+                    
+                    max_range = usable_battery / avg_consumption_laden if avg_consumption_laden > 0 else 0
                     
                     st.write(f"📍 Route: {len(route)} stations, {total_distance:.1f} NM")
                     st.write(f"🔋 Battery: {battery_capacity:,.0f} kWh (range: {max_range:.1f} NM)")
@@ -2089,7 +2838,7 @@ def main() -> None:
                         
                         # Show current configuration summary
                         with st.expander("📋 Current Configuration", expanded=True):
-                            col1, col2, col3 = st.columns(3)
+                            col1, col2, col3, col4, col5 = st.columns(5)
                             
                             with col1:
                                 st.markdown("**Route Info**")
@@ -2097,17 +2846,24 @@ def main() -> None:
                                 st.write(f"- Segments: {len(route) - 1}")
                                 st.write(f"- Total Distance: {total_distance:.1f} NM")
                             
+                            with col3:
+                                st.metric("**Range (Still Water)**", f"{usable_range_still_water_unladen:.0f}/{usable_range_still_water_laden:.0f} NM",
+                                         help=f"Unladen/Laden, still water (no current)")
                             with col2:
-                                st.markdown("**Battery Info**")
-                                st.write(f"- Capacity: {battery_capacity:.0f} kWh")
-                                st.write(f"- Usable: {usable_battery:.0f} kWh ({(1-min_soc_fraction)*100:.0f}%)")
-                                st.write(f"- Range: {max_range:.1f} NM")
+                                st.metric("**Range (Downstream)**", f"{usable_range_downstream_unladen:.0f}/{usable_range_downstream_laden:.0f} NM",
+                                         help=f"Unladen/Laden, downstream (0.8× energy)",
+                                         delta="Best case")
+                            with col4:
+                                st.metric("**Range (Upstream)**", f"{usable_range_upstream_unladen:.0f}/{usable_range_upstream_laden:.0f} NM",
+                                         help=f"Unladen/Laden, upstream (1.2× energy)",
+                                         delta="Worst case")
                             
                             with col3:
                                 st.markdown("**Energy Info**")
-                                st.write(f"- Consumption: {base_consumption:.1f} kWh/NM")
-                                st.write(f"- Est. Energy: {total_distance * base_consumption:.0f} kWh")
-                                energy_deficit = (total_distance * base_consumption) - usable_battery
+                            with col5:
+                                st.metric("**Battery Weight**", f"{battery_weight_tonnes:.1f} t",
+                                         help=f"{weight_ratio:.1f}% of vessel GT")
+                                energy_deficit = (total_distance * base_consumption_laden) - usable_battery
                                 if energy_deficit > 0:
                                     st.error(f"- ⚠️ Deficit: {energy_deficit:.0f} kWh")
                                 else:
@@ -2129,21 +2885,22 @@ def main() -> None:
                             cumulative_distance = 0
                             cumulative_energy = 0
                             
-                            for i in range(len(route) - 1):
-                                start = route[i]
-                                end = route[i + 1]
+                            for start, end in _pairwise(route):
                                 key = f"{start}-{end}"
                                 
                                 distance = config.get('distances_nm', {}).get(key, 0)
                                 current = config.get('currents_knots', {}).get(key, 0)
-                                boat_speed = config.get('boat_speed_knots', 5.0)
                                 
-                                # Calculate energy for this segment
-                                segment_energy = distance * base_consumption
-                                if current < 0:  # Upstream
-                                    segment_energy *= 1.2
-                                else:  # Downstream
-                                    segment_energy *= 0.8
+                                # Use same logic as optimizer
+                                segment_energy, _ = compute_segment_energy(
+                                    distance_nm=distance,
+                                    current_knots=current,
+                                    mode="laden",  # Conservative estimate
+                                    base_consumption_laden=config.get('base_consumption_laden', 245.0),
+                                    base_consumption_unladen=config.get('base_consumption_unladen', 207.0),
+                                    boat_speed_laden=config.get('boat_speed_laden', 5.0),
+                                    boat_speed_unladen=config.get('boat_speed_unladen', 6.0)
+                                )
                                 
                                 cumulative_distance += distance
                                 cumulative_energy += segment_energy

@@ -5,23 +5,10 @@ An advanced optimization tool for planning battery swap strategies for electric 
 ## ✨ Key Features
 
 ### 🔋 **Vessel Types & Hotelling Energy**
-- **10+ vessel categories**: Container vessels, Cruise ships, Auto Carrier, Chemical Tankers, Cargo vessels, Crude oil tanker, Ferry, Offshore Supply, Service Vessels, and more
-- **Industry-standard cold-ironing reference data**: Actual measured hotelling power from shore power installations worldwide
-- **Automatic hotelling power lookup** based on vessel type and gross tonnage (GT) using empirical port data
-- **Energy consumption modeling** for onboard services (HVAC, lighting, pumps) during dwell time at berth
-- **Research-based power demand ranges** covering GT from 150 to 100,000+ tons
-- **Data sources**: EU shore power studies (2018-2023), IMO/IAPH port energy demand analysis, major port cold-ironing reports
 
-### 💰 **Hybrid Pricing Model**
+ - Background: This repository implements a DP model to schedule battery-swaps and charging for marine vessels.
+ - New: Station-level background charging support between visits (see BACKGROUND_CHARGING.md for details).
 - **Service fees** per battery container swap
-- **SoC-based billing**: Pay only for actual energy charged (not full battery capacity)
-- **Hotelling energy costs**: Energy for onboard auxiliary systems during dwell time
-- **Base service fees** per transaction
-- **Location premiums** for strategic/high-demand ports
-- **Degradation fees** based on battery wear per kWh cycled
-- **Peak hour pricing** with time-of-day multipliers
-- **Subscription discounts** for regular customers
-
 ### 🗺️ **Route & Battery Management**
 - **Partial swap support**: Swap only depleted battery containers (cost optimization)
 - **Full swap mode**: Replace entire battery set (standard practice)
